@@ -29,7 +29,7 @@ source.include_exts = py,png,jpg,kv,atlas
 #source.exclude_patterns = license,images/*/*.jpg
 
 # (str) Application versioning (method 1)
-version = 0.1
+version = 0.35
 
 # (str) Application versioning (method 2)
 # version.regex = __version__ = ['"](.*)['"]
@@ -37,7 +37,7 @@ version = 0.1
 
 # (list) Application requirements
 # comma separated e.g. requirements = sqlite3,kivy
-requirements = python3,kivy,pyjnius,android
+requirements = python3,kivy,pyjnius,android,openssl,libffi,cffi,cryptography,bcrypt,pynacl,paramiko
 
 # (str) Custom source folders for requirements
 # Sets custom source for any requirements with recipes
@@ -175,7 +175,7 @@ android.minapi = 21
 # their classes. Don't add jars that you do not need, since extra jars can slow
 # down the build process. Allows wildcards matching, for example:
 # OUYA-ODK/libs/*.jar
-android.add_jars = jsch-0.1.55.jar
+android.add_jars =
 
 # (list) List of Java files to add to the android project (can be java or a
 # directory containing the files)
