@@ -25,15 +25,20 @@ if platform == 'android':
     activity = PythonActivity.mActivity
 
 # ---------- Constants ----------
-HOST = '192.168.0.12'      # Windows IP
+# Χρήση localhost για testing, 192.168.0.12 για Android
+HOST = '127.0.0.1'
+if platform == 'android' : HOST = '192.168.0.8'
 PORT = 22
 USER = 'alekos'
 PASS = '@lekos'          # <-- Μην το hard‑code σε production!
 # ϛ. 2-3 lines
 COMMANDS = {
-    "μουσική": '"C:\Program Files\Audacity\Audacity.exe"',
-    "σιωπή": "taskkill /IM ""C:\Program Files\Audacity\Audacity.exe"" /F",
-    "εξέταση": "dir /s /p",
+    "σημειώσεις": "notepad.exe",
+    "δίκτυο": "ipconfig.exe",
+    "μουσική": r"C:\Program Files\Audacity\Audacity.exe",
+    "κείμενο": r"C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE",
+    "εξέταση": "explorer.exe",
+
 }
 
 # ---------- Helpers ----------
@@ -45,21 +50,93 @@ def run_remote(cmd):
     try:
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(HOST, PORT, USER, PASS, timeout=30)
-        
-        stdin, stdout, stderr = client.exec_command(cmd)
-        
-        output = stdout.read().decode('utf-8').strip()
-        error = stderr.read().decode('utf-8').strip()
-        
-        client.close()
 
-        if error:
-             return f"Error output:\n{error}\n\nStandard output:\n{output}"
+        # Μικρότερα timeouts για να μην κολλάει η εφαρμογή
+        client.connect(
+            HOST, PORT, USER, PASS, 
+            timeout=10,        # Connection timeout
+            banner_timeout=10  # SSH banner timeout
+        )
+
+        # Ανίχνευση εντολών που ξεκινούν προγράμματα που μένουν ενεργά
+        cmd_lower = cmd.lower().strip()
+        is_background_cmd = (
+            cmd_lower.startswith('start ') or 
+            '.exe' in cmd_lower or
+            'msconfig' in cmd_lower
+        )
+
+        if is_background_cmd:
+            # Για GUI εφαρμογές, χρησιμοποιούμε το PsExec για να τρέξουν
+            # στο interactive user session (Session 1).
+            # Το -i 1 σημαίνει: εκτέλεση στο Session ID 1 (το πρώτο interactive session)
+            # Το -d σημαίνει: don't wait for process termination
+            # Το -accepteula σημαίνει: αποδοχή του EULA αυτόματα
+            
+            # Αφαιρούμε το 'start ' αν υπάρχει
+            if cmd_lower.startswith('start '):
+                cmd = cmd[6:].strip()
+            
+            # Αν η εντολή περιέχει κενά και δεν έχει ήδη εισαγωγικά, προσθέτουμε
+            if ' ' in cmd and not (cmd.startswith('"') and cmd.endswith('"')):
+                cmd_quoted = f'"{cmd}"'
+            else:
+                cmd_quoted = cmd
+            
+            # Δημιουργία της psexec εντολής
+            # -i 1 = interactive session 1
+            # -u username -p password = τρέχει με τα δικαιώματα του συγκεκριμένου χρήστη
+            # -d = don't wait for termination
+            # -accepteula = αυτόματη αποδοχή EULA
+            psexec_cmd = f'psexec -i 1 -u {USER} -p {PASS} -d -accepteula {cmd_quoted}'
+            
+            try:
+                stdin, stdout, stderr = client.exec_command(psexec_cmd, timeout=10)
+                output = stdout.read().decode('utf-8', errors='ignore').strip()
+                error = stderr.read().decode('utf-8', errors='ignore').strip()
+                
+                client.close()
+                
+                debug_info = f"📋 DEBUG INFO:\n"
+                debug_info += f"Command sent: {psexec_cmd}\n"
+                debug_info += f"Stdout: {output}\n"
+                debug_info += f"Stderr: {error}\n"
+                
+                if error and ('ERROR' in error or 'denied' in error.lower()):
+                    return f"⚠️ Σφάλμα psexec:\n{error}\n\n{debug_info}"
+                
+                return f"✓ Πρόγραμμα εκτελέστηκε με psexec\n{debug_info}"
+                
+            except Exception as psexec_err:
+                client.close()
+                return f"⚠️ Exception στο psexec: {psexec_err}"
+        else:
+            # Για κανονικές εντολές που τερματίζουν, περιμένουμε το αποτέλεσμα
+            stdin, stdout, stderr = client.exec_command(cmd, timeout=25)
+
+            output = stdout.read().decode('utf-8', errors='ignore').strip()
+            error = stderr.read().decode('utf-8', errors='ignore').strip()
+
+            client.close()
+
+            if error:
+                 return f"Error output:\n{error}\n\nStandard output:\n{output}"
+            
+            return output if output else "Εντολή εκτελέστηκε (χωρίς έξοδο)"
         
-        return output
+    except paramiko.AuthenticationException:
+        return f'❌ SSH Error: Λάθος username ή password για {HOST}'
+    except paramiko.SSHException as ssh_err:
+        return f'❌ SSH Error: {ssh_err}'
+    except TimeoutError:
+        return f'❌ Timeout: Δεν απαντά το {HOST}:{PORT} (SSH server offline;)'
+    except ConnectionRefusedError:
+        return f'❌ Connection Refused: Το {HOST}:{PORT} αρνήθηκε τη σύνδεση'
+    except OSError as os_err:
+        # Socket errors, network unreachable, etc.
+        return f'❌ Network Error: {os_err}'
     except Exception as e:
-        return f'Connection Error: {e}'
+        return f'❌ Unexpected Error: {type(e).__name__}: {e}'
 
 # ---------- Kivy UI ----------
 class VoiceSSHApp(App):
@@ -73,8 +150,8 @@ class VoiceSSHApp(App):
 
         self.root = BoxLayout(orientation='vertical', padding=20, spacing=20)
 
-        self.status_lbl = Label(text='4444 Πάτησε για να ακούσω',
-                                font_size='20sp', size_hint_y=None, height=50)
+        self.status_lbl = Label(text='Πάτησε για να ακούσω',
+                                font_size='20sp', size_hint_y=1)
         self.root.add_widget(self.status_lbl)
 
         self.output_lbl = Label(text='', halign='left',
@@ -115,7 +192,9 @@ class VoiceSSHApp(App):
 
     def start_listening(self, *args):
         if platform != 'android':
-            #self.handle_command("μουσική")
+            #alexei
+            self.handle_command("κείμενο")
+            self.handle_command("μουσική")
             self.status_lbl.text = 'Δοκίμασε στο Android!'
             return
 
