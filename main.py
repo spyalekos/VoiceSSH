@@ -1,19 +1,24 @@
 # main.py
 import sys
 import io
-from kivy.app import App
-from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.gridlayout import GridLayout
-from kivy.uix.scrollview import ScrollView
-from kivy.uix.button import Button
-from kivy.uix.label import Label
-from kivy.uix.textinput import TextInput
-from kivy.uix.popup import Popup
-from kivy.uix.dropdown import DropDown
+from kivymd.app import MDApp
+from kivymd.uix.boxlayout import MDBoxLayout
+from settings_screen import SettingsScreen, ConnectionEditScreen
+from about_screen import AboutScreen
+from kivymd.uix.gridlayout import MDGridLayout
+from kivymd.uix.scrollview import MDScrollView
+from kivymd.uix.button import MDRaisedButton, MDIconButton, MDRectangleFlatIconButton, MDFloatingActionButton
+from kivymd.uix.label import MDLabel
+from kivymd.uix.textfield import MDTextField
+from kivymd.uix.list import MDList, TwoLineAvatarIconListItem, IconRightWidget, IconLeftWidget, ImageLeftWidget
+from kivymd.uix.dialog import MDDialog
+from kivymd.uix.menu import MDDropdownMenu
+from kivymd.uix.toolbar import MDTopAppBar
 from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.clock import Clock
 from kivy.core.window import Window
 from kivy.utils import platform
+from kivy.metrics import dp
 import paramiko
 
 # Import database module
@@ -32,25 +37,32 @@ if platform == 'android':
     Context = autoclass('android.content.Context')
     PythonActivity = autoclass('org.kivy.android.PythonActivity')
     activity = PythonActivity.mActivity
+    
+    # Text-to-Speech classes
+    TextToSpeech = autoclass('android.speech.tts.TextToSpeech')
+    Locale = autoclass('java.util.Locale')
 
 # ---------- Constants ----------
-# Χρήση localhost για testing, 192.168.0.12 για Android
-HOST = '127.0.0.1'
-if platform == 'android' : HOST = '192.168.0.8'
-PORT = 22
-USER = 'alekos'
-PASS = '@lekos'          # <-- Μην το hard‑code σε production!
-
 
 # ---------- Helpers ----------
-def run_remote(cmd):
+def run_remote(cmd, alias='Primary'):
     """
-    Εκτελεί εντολή σε Windows μέσω SSH (Paramiko).
+    Εκτελεί εντολή σε Windows μέσω SSH (Paramiko) χρησιμοποιώντας το συγκεκριμένο alias.
     Returns stdout (string) ή σφάλμα (string).
     """
     try:
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        
+        # Load settings for this alias
+        conn_details = database.get_ssh_connection(alias)
+        if not conn_details:
+            return f'❌ Σφάλμα: Δεν βρέθηκαν ρυθμίσεις για το alias "{alias}"'
+            
+        HOST = conn_details['host']
+        PORT = int(conn_details['port'])
+        USER = conn_details['username']
+        PASS = conn_details['password']
 
         # Μικρότερα timeouts για να μην κολλάει η εφαρμογή
         client.connect(
@@ -66,6 +78,8 @@ def run_remote(cmd):
             '.exe' in cmd_lower or
             'msconfig' in cmd_lower
         )
+        # Καταργώ την Ανίχνευση εντολών που ξεκινούν προγράμματα που μένουν ενεργά
+        is_background_cmd=True
 
         if is_background_cmd:
             # Για GUI εφαρμογές, χρησιμοποιούμε το PsExec για να τρέξουν
@@ -103,10 +117,13 @@ def run_remote(cmd):
                 debug_info += f"Stdout: {output}\n"
                 debug_info += f"Stderr: {error}\n"
                 
-                if error and ('ERROR' in error or 'denied' in error.lower()):
-                    return f"⚠️ Σφάλμα psexec:\n{error}\n\n{debug_info}"
+                # Create masked version for return
+                masked_debug = debug_info.replace(USER, "***").replace(PASS, "***")
                 
-                return f"✓ Πρόγραμμα εκτελέστηκε με psexec\n{debug_info}"
+                if error and ('ERROR' in error or 'denied' in error.lower()):
+                    return f"⚠️ Σφάλμα psexec:\n{error}\n\n{masked_debug}"
+                
+                return f"✓ Πρόγραμμα εκτελέστηκε με psexec\n{masked_debug}"
                 
             except Exception as psexec_err:
                 client.close()
@@ -148,88 +165,136 @@ class MainScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.speech_recognizer = None
+        self.menu = None
+        self.tts = None
+        self.tts_initialized = False
         self.build_ui()
     
     def build_ui(self):
-        layout = BoxLayout(orientation='vertical', padding=20, spacing=15)
+        layout = MDBoxLayout(orientation='vertical')
         
-        # Τίτλος
-        title = Label(text='🎤 VoiceSSH', font_size='28sp', 
-                      size_hint_y=None, height=50, bold=True)
-        layout.add_widget(title)
+        # Toolbar
+        self.toolbar = MDTopAppBar(title="Φωνητικές Εντολές", elevation=4)
+        self.toolbar.md_bg_color=[0,0,1,1]
+        self.toolbar.right_action_items = [["file", lambda x: self.go_to_commands_list(x)], ["cog", lambda x: self.go_to_settings(x)], ["information", lambda x: self.go_to_about(x)]]
+        self.toolbar.icon_color=[0,0,0,1]
+        layout.add_widget(self.toolbar)
+
+        # Content Layout
+        content = MDBoxLayout(orientation='vertical', padding=dp(20), spacing=dp(20))
         
-        # ----- Μενού Προσταγμάτων -----
-        menu_layout = BoxLayout(orientation='horizontal', size_hint_y=None, height=50, spacing=10)
-        
-        # Dropdown για γρήγορη εκτέλεση
-        self.dropdown = DropDown()
-        self.main_btn = Button(text='⚡ Εκτέλεση Εντολής', size_hint_x=0.6, font_size='16sp')
-        self.main_btn.bind(on_release=self.open_dropdown)
+        # Quick Commands Menu Button
+        menu_layout = MDBoxLayout(orientation='horizontal', adaptive_height=True, spacing=dp(10))
+        self.main_btn = MDRectangleFlatIconButton(
+            text="Επιλογή Εντολής",
+            icon="format-list-bulleted",
+            size_hint_x=1,
+            pos_hint={'center_x': 0.5}
+        )
+        self.main_btn.bind(on_release=self.open_menu)
         menu_layout.add_widget(self.main_btn)
+        content.add_widget(menu_layout)
         
-        # Κουμπί διαχείρισης
-        manage_btn = Button(text='⚙️ Διαχείριση', size_hint_x=0.4, font_size='16sp')
-        manage_btn.bind(on_release=self.go_to_commands_list)
-        menu_layout.add_widget(manage_btn)
-        
-        layout.add_widget(menu_layout)
-        
-        # ----- Status & Output -----
-        self.status_lbl = Label(text='Πάτησε για να ακούσω',
-                                font_size='20sp', size_hint_y=0.3)
-        layout.add_widget(self.status_lbl)
+        # Status Label
+        self.status_lbl = MDLabel(
+            text='Πάτησε το μικρόφωνο για να ακούσω',
+            halign='center',
+            theme_text_color="Secondary",
+            font_style="H6",
+            size_hint_y=0.2
+        )
+        content.add_widget(self.status_lbl)
 
-        self.output_lbl = Label(text='', halign='left',
-                                valign='top', font_size='16sp', size_hint_y=0.5)
-        self.output_lbl.bind(size=self._update_text_size)
-        layout.add_widget(self.output_lbl)
+        # Output ScrollView
+        scroll = MDScrollView(size_hint_y=0.5)
+        self.output_lbl = MDLabel(
+            text='Αναμονή για εντολή...',
+            halign='left',
+            valign='top',
+            theme_text_color="Primary",
+            size_hint_y=None
+        )
+        self.output_lbl.bind(texture_size=self.output_lbl.setter('size'))
+        scroll.add_widget(self.output_lbl)
+        content.add_widget(scroll)
 
-        # ----- Κουμπί Φωνητικής Εντολής -----
-        btn = Button(text='🎙️ Πάτησε για φωνητική εντολή',
-                     size_hint_y=None, height=70, font_size='20sp')
-        btn.bind(on_release=self.start_listening)
-        layout.add_widget(btn)
+        # Microphone FAB
+        fab_layout = MDBoxLayout(orientation='vertical', adaptive_height=True, padding=[0, dp(20), 0, 0])
+        self.mic_btn = MDFloatingActionButton(
+            icon="microphone",
+            type="large",
+            pos_hint={'center_x': 0.5},
+            md_bg_color=MDApp.get_running_app().theme_cls.primary_color
+        )
+        self.mic_btn.bind(on_release=self.start_listening)
+        fab_layout.add_widget(self.mic_btn)
+        content.add_widget(fab_layout)
 
+        layout.add_widget(content)
         self.add_widget(layout)
     
-    def _update_text_size(self, instance, value):
-        instance.text_size = (instance.width - 20, None)
-    
     def on_enter(self):
-        """Κάθε φορά που μπαίνουμε στην οθόνη, ανανεώνουμε το dropdown."""
-        self.refresh_dropdown()
+        """Initialize TTS when entering the screen, with debugging."""
+        # Initialize TTS on first entry, wrapped in try/except to avoid crashes
+        if platform == 'android' and not self.tts_initialized:
+            try:
+                self.init_tts()
+                print('TTS initialization attempted.')
+            except Exception as e:
+                print(f'TTS initialization failed with exception: {e}')
     
-    def open_dropdown(self, btn):
-        self.refresh_dropdown()
-        self.dropdown.open(btn)
-    
-    def refresh_dropdown(self):
-        """Ανανέωση dropdown με τα τρέχοντα commands από τη βάση."""
-        self.dropdown.clear_widgets()
+    def open_menu(self, btn):
         commands = database.get_all_commands()
-        
+        menu_items = []
         for cmd in commands:
-            item = Button(text=f"▶ {cmd['name']}", size_hint_y=None, height=44)
-            item.cmd_data = cmd
-            item.bind(on_release=self.execute_from_dropdown)
-            self.dropdown.add_widget(item)
+            menu_items.append(
+                {
+                    "viewclass": "OneLineListItem",
+                    "text": cmd['name'],
+                    "on_release": lambda x=cmd: self.execute_from_menu(x),
+                }
+            )
         
-        if not commands:
-            no_cmd = Button(text="(Κανένα πρόσταγμα)", size_hint_y=None, height=44)
-            self.dropdown.add_widget(no_cmd)
+        if not menu_items:
+            menu_items.append({"viewclass": "OneLineListItem", "text": "(Κανένα πρόσταγμα)"})
+
+        self.menu = MDDropdownMenu(
+            caller=btn,
+            items=menu_items,
+            width_mult=4,
+        )
+        self.menu.open()
     
-    def execute_from_dropdown(self, btn):
+    def execute_from_menu(self, cmd_data):
         """Εκτέλεση εντολής από το dropdown."""
-        self.dropdown.dismiss()
-        cmd = btn.cmd_data
-        self.status_lbl.text = f'Εκτέλεση: {cmd["name"]}'
-        self.output_lbl.text = f'⚙️ Εκτέλεση: {cmd["executable"]}\n\n'
-        output = run_remote(cmd['executable'])
+        self.menu.dismiss()
+        self.status_lbl.text = f'Εκτέλεση: {cmd_data["name"]}'
+        self.output_lbl.text = f'⚙️ Εκτέλεση: {cmd_data["executable"]} (@{cmd_data["alias"]})\n\n'
+        
+        # Run in thread or schedule logic if needed, simple call for now
+        Clock.schedule_once(lambda dt: self._run_cmd(cmd_data['executable'], cmd_data['alias']), 0.1)
+
+    def _run_cmd(self, executable, alias='Primary'):
+        output = run_remote(executable, alias)
         self.output_lbl.text += f'Output:\n{output}'
+        
+        # Voice feedback based on command result
+        if '❌' in output or 'σφάλμα' in output.lower() or 'error' in output.lower():
+            self.speak_text('η εντολή απέτυχε')
+        else:
+            self.speak_text('η εντολή εκτελέστηκε με επιτυχία')
     
     def go_to_commands_list(self, btn):
         """Μετάβαση στη λίστα προσταγμάτων."""
         self.manager.current = 'commands_list'
+
+    def go_to_settings(self, btn):
+        """Μετάβαση στη σελίδα ρυθμίσεων."""
+        self.manager.current = 'settings'
+
+    def go_to_about(self, btn):
+        """Μετάβαση στη σελίδα πληροφοριών."""
+        self.manager.current = 'about'
     
     def cleanup_recognizer(self):
         """Καθαρισμός του SpeechRecognizer στο UI thread"""
@@ -253,8 +318,8 @@ class MainScreen(Screen):
                         pass
                     self.app_ref.speech_recognizer = None
         
-        runnable = CleanupRunnable(self)
-        activity.runOnUiThread(runnable)
+        self.cleanup_runnable = CleanupRunnable(self)
+        activity.runOnUiThread(self.cleanup_runnable)
 
     def start_listening(self, *args):
         if platform != 'android':
@@ -363,15 +428,84 @@ class MainScreen(Screen):
                     sr.setRecognitionListener(self.listener)
                     sr.startListening(self.intent)
             
-            listener = RecognitionListener()
-            runnable = SpeechRunnable(listener, intent)
+            self.recognition_listener = RecognitionListener()
+            self.speech_runnable = SpeechRunnable(self.recognition_listener, intent)
             
             # Εκτέλεση στο Android UI thread
-            activity.runOnUiThread(runnable)
+            activity.runOnUiThread(self.speech_runnable)
             
         except Exception as e:
             self.status_lbl.text = f'Εξαίρεση: {str(e)}'
             self.output_lbl.text = f'Σφάλμα κατά την εκκίνηση: {str(e)}'
+    
+    def init_tts(self):
+        """Initialize Android Text-to-Speech."""
+        if platform != 'android':
+            return
+        
+        try:
+            app_ref = self
+            
+            def on_tts_ready(success):
+                """Called on Kivy main thread when TTS is ready."""
+                if success:
+                    app_ref.tts_initialized = True
+                    try:
+                        # Set Greek language
+                        locale = Locale('el', 'GR')
+                        result = app_ref.tts.setLanguage(locale)
+                        if result == TextToSpeech.LANG_MISSING_DATA or result == TextToSpeech.LANG_NOT_SUPPORTED:
+                            print('Greek language not supported for TTS')
+                    except Exception as e:
+                        print(f'TTS setLanguage error: {e}')
+                else:
+                    print('TTS initialization failed')
+            
+            class TTSListener(PythonJavaClass):
+                __javainterfaces__ = ['android/speech/tts/TextToSpeech$OnInitListener']
+                
+                @java_method('(I)V')
+                def onInit(self, status):
+                    # Use Clock.schedule_once to run on Kivy's main thread
+                    try:
+                        success = (status == TextToSpeech.SUCCESS)
+                        Clock.schedule_once(lambda dt: on_tts_ready(success), 0)
+                    except Exception as e:
+                        print(f'TTS onInit exception: {e}')
+            
+            # Create a Runnable to initialize TTS on Android UI thread
+            class TTSInitRunnable(PythonJavaClass):
+                __javainterfaces__ = ['java/lang/Runnable']
+                
+                def __init__(self, app, listener):
+                    super().__init__()
+                    self.app = app
+                    self.listener = listener
+                
+                @java_method('()V')
+                def run(self):
+                    try:
+                        self.app.tts = TextToSpeech(activity, self.listener)
+                    except Exception as e:
+                        print(f'TTS creation error: {e}')
+            
+            # Keep reference to prevent garbage collection
+            self._tts_listener = TTSListener()
+            self.tts_init_runnable = TTSInitRunnable(self, self._tts_listener)
+            activity.runOnUiThread(self.tts_init_runnable)
+            
+        except Exception as e:
+            print(f'TTS initialization error: {e}')
+    
+    def speak_text(self, text):
+        """Speak text using Android TTS."""
+        if platform != 'android' or not self.tts or not self.tts_initialized:
+            return
+        
+        try:
+            self.tts.speak(text, TextToSpeech.QUEUE_FLUSH, None, None)
+        except Exception as e:
+            print(f'TTS speak error: {e}')
 
     def handle_command(self, recognized_text):
         self.status_lbl.text = f'Αναγνωρίστηκε: "{recognized_text}"'
@@ -379,17 +513,19 @@ class MainScreen(Screen):
         recognized_text = recognized_text.strip().lower()
         
         # Χρήση βάσης δεδομένων
-        commands = database.get_commands_dict()
-        cmd = commands.get(recognized_text)
+        # Χρήση βάσης δεδομένων
+        cmd_details = database.get_command_details(recognized_text)
         
-        if cmd is None:
+        if cmd_details is None:
             self.output_lbl.text = f'❌ Δεν αναγνωρίστηκε εντολή: "{recognized_text}"'
             return
 
-        self.output_lbl.text = f'⚙️ Εκτέλεση: {cmd}\n\n'
+        cmd_exec = cmd_details['executable']
+        cmd_alias = cmd_details['alias']
+
+        self.output_lbl.text = f'⚙️ Εκτέλεση: {cmd_exec} (@{cmd_alias})\n\n'
         # Αποστολή SSH
-        output = run_remote(cmd)
-        self.output_lbl.text += f'Output:\n{output}'
+        Clock.schedule_once(lambda dt: self._run_cmd(cmd_exec, cmd_alias), 0.1)
 
 
 class CommandsListScreen(Screen):
@@ -400,31 +536,21 @@ class CommandsListScreen(Screen):
         self.build_ui()
     
     def build_ui(self):
-        main_layout = BoxLayout(orientation='vertical', padding=15, spacing=10)
+        layout = MDBoxLayout(orientation='vertical')
         
-        # Header
-        header = BoxLayout(orientation='horizontal', size_hint_y=None, height=50)
-        back_btn = Button(text='← Πίσω', size_hint_x=0.3, font_size='16sp')
-        back_btn.bind(on_release=self.go_back)
-        header.add_widget(back_btn)
+        # Toolbar
+        toolbar = MDTopAppBar(title="Διαχείριση", elevation=4)
+        toolbar.left_action_items = [["arrow-left", lambda x: self.go_back()]]
+        toolbar.right_action_items = [["plus", lambda x: self.add_command()]]
+        layout.add_widget(toolbar)
         
-        title = Label(text='📋 Προστάγματα', font_size='22sp', size_hint_x=0.4)
-        header.add_widget(title)
-        
-        add_btn = Button(text='+ Νέο', size_hint_x=0.3, font_size='16sp')
-        add_btn.bind(on_release=self.add_command)
-        header.add_widget(add_btn)
-        
-        main_layout.add_widget(header)
-        
-        # Scrollable list
-        scroll = ScrollView(size_hint=(1, 1))
-        self.list_layout = GridLayout(cols=1, spacing=8, size_hint_y=None)
-        self.list_layout.bind(minimum_height=self.list_layout.setter('height'))
+        # List in ScrollView
+        scroll = MDScrollView()
+        self.list_layout = MDList()
         scroll.add_widget(self.list_layout)
-        main_layout.add_widget(scroll)
+        layout.add_widget(scroll)
         
-        self.add_widget(main_layout)
+        self.add_widget(layout)
     
     def on_enter(self):
         """Ανανέωση λίστας κάθε φορά που μπαίνουμε."""
@@ -436,104 +562,68 @@ class CommandsListScreen(Screen):
         commands = database.get_all_commands()
         
         for cmd in commands:
-            item = BoxLayout(orientation='horizontal', size_hint_y=None, height=60, spacing=5)
+            # Custom item with icons
+            item = TwoLineAvatarIconListItem(
+                text=cmd['name'],
+                secondary_text=f"{cmd['executable']} ({cmd['alias']})",
+                on_release=lambda x, c=cmd: self.edit_command(c['id'])
+            )
             
-            # Info
-            info_layout = BoxLayout(orientation='vertical', size_hint_x=0.5)
-            name_lbl = Label(text=cmd['name'], font_size='18sp', halign='left')
-            name_lbl.bind(size=lambda inst, val: setattr(inst, 'text_size', (inst.width, None)))
-            exec_lbl = Label(text=cmd['executable'][:40] + '...' if len(cmd['executable']) > 40 else cmd['executable'],
-                            font_size='12sp', halign='left', color=(0.7, 0.7, 0.7, 1))
-            exec_lbl.bind(size=lambda inst, val: setattr(inst, 'text_size', (inst.width, None)))
-            info_layout.add_widget(name_lbl)
-            info_layout.add_widget(exec_lbl)
-            item.add_widget(info_layout)
+            # Icon Left (Command Icon)
+            icon_left = IconLeftWidget(icon="console")
+            item.add_widget(icon_left)
             
-            # Κουμπιά
-            edit_btn = Button(text='✏️', size_hint_x=0.15, font_size='20sp')
-            edit_btn.cmd_id = cmd['id']
-            edit_btn.bind(on_release=self.edit_command)
-            item.add_widget(edit_btn)
-            
-            exec_btn = Button(text='▶', size_hint_x=0.15, font_size='20sp')
-            exec_btn.cmd_data = cmd
-            exec_btn.bind(on_release=self.execute_command)
-            item.add_widget(exec_btn)
-            
-            del_btn = Button(text='🗑️', size_hint_x=0.2, font_size='20sp')
-            del_btn.cmd_id = cmd['id']
-            del_btn.cmd_name = cmd['name']
-            del_btn.bind(on_release=self.confirm_delete)
-            item.add_widget(del_btn)
+            # Icon Right (Delete)
+            icon_right = IconRightWidget(icon="delete", on_release=lambda x, i=cmd['id'], n=cmd['name']: self.confirm_delete(i, n))
+            item.add_widget(icon_right)
             
             self.list_layout.add_widget(item)
         
         if not commands:
-            no_cmd = Label(text='Δεν υπάρχουν προστάγματα.\nΠάτησε "+ Νέο" για να προσθέσεις.',
-                          font_size='16sp', size_hint_y=None, height=100)
-            self.list_layout.add_widget(no_cmd)
+            self.list_layout.add_widget(
+                TwoLineAvatarIconListItem(
+                    text="Δεν υπάρχουν προστάγματα", 
+                    secondary_text="Πάτησε το + για προσθήκη"
+                )
+            )
     
-    def go_back(self, btn):
+    def go_back(self):
         self.manager.current = 'main'
     
-    def add_command(self, btn):
+    def add_command(self):
         """Μετάβαση στη φόρμα προσθήκης."""
         edit_screen = self.manager.get_screen('command_edit')
         edit_screen.set_mode('add')
         self.manager.current = 'command_edit'
     
-    def edit_command(self, btn):
+    def edit_command(self, cmd_id):
         """Μετάβαση στη φόρμα επεξεργασίας."""
         edit_screen = self.manager.get_screen('command_edit')
-        edit_screen.set_mode('edit', btn.cmd_id)
+        edit_screen.set_mode('edit', cmd_id)
         self.manager.current = 'command_edit'
     
-    def execute_command(self, btn):
-        """Εκτέλεση εντολής."""
-        cmd = btn.cmd_data
-        # Popup με αποτέλεσμα
-        content = BoxLayout(orientation='vertical', padding=10, spacing=10)
-        result_lbl = Label(text=f'⚙️ Εκτέλεση: {cmd["executable"]}...', font_size='14sp')
-        content.add_widget(result_lbl)
-        
-        close_btn = Button(text='Κλείσιμο', size_hint_y=None, height=50)
-        content.add_widget(close_btn)
-        
-        popup = Popup(title=f'Εκτέλεση: {cmd["name"]}',
-                     content=content, size_hint=(0.9, 0.5))
-        close_btn.bind(on_release=popup.dismiss)
-        popup.open()
-        
-        # Εκτέλεση
-        def do_execute(dt):
-            output = run_remote(cmd['executable'])
-            result_lbl.text = f'Output:\n{output}'
-        Clock.schedule_once(do_execute, 0.1)
-    
-    def confirm_delete(self, btn):
+    def confirm_delete(self, cmd_id, cmd_name):
         """Επιβεβαίωση διαγραφής."""
-        content = BoxLayout(orientation='vertical', padding=15, spacing=15)
-        content.add_widget(Label(text=f'Διαγραφή του "{btn.cmd_name}";', font_size='18sp'))
+        self.dialog = MDDialog(
+            text=f'Διαγραφή του "{cmd_name}";',
+            buttons=[
+                MDRaisedButton(
+                    text="ΑΚΥΡΩΣΗ",
+                    on_release=lambda x: self.dialog.dismiss()
+                ),
+                MDRaisedButton(
+                    text="ΔΙΑΓΡΑΦΗ",
+                    md_bg_color=(1, 0.3, 0.3, 1),
+                    on_release=lambda x: self.do_delete(cmd_id)
+                ),
+            ],
+        )
+        self.dialog.open()
         
-        buttons = BoxLayout(orientation='horizontal', spacing=10, size_hint_y=None, height=50)
-        cancel_btn = Button(text='Ακύρωση', font_size='16sp')
-        delete_btn = Button(text='Διαγραφή', font_size='16sp', 
-                           background_color=(1, 0.3, 0.3, 1))
-        delete_btn.cmd_id = btn.cmd_id
-        buttons.add_widget(cancel_btn)
-        buttons.add_widget(delete_btn)
-        content.add_widget(buttons)
-        
-        popup = Popup(title='Επιβεβαίωση', content=content, size_hint=(0.8, 0.4))
-        cancel_btn.bind(on_release=popup.dismiss)
-        
-        def do_delete(btn_instance):
-            database.delete_command(btn_instance.cmd_id)
-            popup.dismiss()
-            self.refresh_list()
-        
-        delete_btn.bind(on_release=do_delete)
-        popup.open()
+    def do_delete(self, cmd_id):
+        database.delete_command(cmd_id)
+        self.dialog.dismiss()
+        self.refresh_list()
 
 
 class CommandEditScreen(Screen):
@@ -543,92 +633,132 @@ class CommandEditScreen(Screen):
         super().__init__(**kwargs)
         self.mode = 'add'
         self.command_id = None
+        self.menu = None
         self.build_ui()
     
     def build_ui(self):
-        main_layout = BoxLayout(orientation='vertical', padding=20, spacing=15)
+        layout = MDBoxLayout(orientation='vertical')
         
-        # Header
-        header = BoxLayout(orientation='horizontal', size_hint_y=None, height=50)
-        back_btn = Button(text='← Ακύρωση', size_hint_x=0.4, font_size='16sp')
-        back_btn.bind(on_release=self.go_back)
-        header.add_widget(back_btn)
-        
-        self.title_lbl = Label(text='Νέο Πρόσταγμα', font_size='20sp', size_hint_x=0.6)
-        header.add_widget(self.title_lbl)
-        main_layout.add_widget(header)
+        # Toolbar
+        self.toolbar = MDTopAppBar(title="Νέο Πρόσταγμα", elevation=4)
+        self.toolbar.left_action_items = [["close", lambda x: self.go_back()]]
+        self.toolbar.right_action_items = [["content-save", lambda x: self.save_command()]]
+        layout.add_widget(self.toolbar)
         
         # Form
-        form = BoxLayout(orientation='vertical', spacing=15)
+        form = MDBoxLayout(orientation='vertical', padding=dp(20), spacing=dp(20))
         
-        form.add_widget(Label(text='Όνομα Προστάγματος:', font_size='16sp', 
-                             size_hint_y=None, height=30, halign='left'))
-        self.name_input = TextInput(hint_text='π.χ. μουσική', font_size='18sp',
-                                   multiline=False, size_hint_y=None, height=50)
+        self.name_input = MDTextField(
+            hint_text="Όνομα Προστάγματος",
+            helper_text="π.χ. μουσική",
+            helper_text_mode="on_focus",
+            mode="rectangle"
+        )
         form.add_widget(self.name_input)
         
-        form.add_widget(Label(text='Εντολή/Εκτελέσιμο:', font_size='16sp',
-                             size_hint_y=None, height=30, halign='left'))
-        self.exec_input = TextInput(hint_text='π.χ. C:\\Program Files\\App.exe', 
-                                   font_size='16sp', multiline=True, size_hint_y=None, height=100)
+        self.exec_input = MDTextField(
+            hint_text="Εντολή/Εκτελέσιμο",
+            helper_text="π.χ. C:\\Program Files\\App.exe",
+            helper_text_mode="on_focus",
+            mode="rectangle",
+            multiline=True
+        )
         form.add_widget(self.exec_input)
         
-        main_layout.add_widget(form)
+        # Alias Selector
+        self.alias_btn = MDRectangleFlatIconButton(
+            text="Primary",
+            icon="server",
+            size_hint_x=1,
+            pos_hint={'center_x': 0.5}
+        )
+        self.alias_btn.bind(on_release=self.open_alias_menu)
+        form.add_widget(self.alias_btn)
         
-        # Error label
-        self.error_lbl = Label(text='', font_size='14sp', color=(1, 0.3, 0.3, 1),
-                              size_hint_y=None, height=30)
-        main_layout.add_widget(self.error_lbl)
+        self.error_lbl = MDLabel(
+            text='',
+            theme_text_color="Error",
+            halign="center"
+        )
+        form.add_widget(self.error_lbl)
         
-        # Spacer
-        main_layout.add_widget(BoxLayout())
+        form.add_widget(MDBoxLayout()) # Spacer
         
-        # Save button
-        save_btn = Button(text='💾 Αποθήκευση', size_hint_y=None, height=60, font_size='20sp')
-        save_btn.bind(on_release=self.save_command)
-        main_layout.add_widget(save_btn)
-        
-        self.add_widget(main_layout)
+        layout.add_widget(form)
+        self.add_widget(layout)
     
+    def open_alias_menu(self, btn):
+        aliases = database.get_connection_aliases()
+        menu_items = [
+            {
+                "viewclass": "OneLineListItem",
+                "text": alias,
+                "on_release": lambda x=alias: self.set_alias(x),
+            } for alias in aliases
+        ]
+        self.menu = MDDropdownMenu(
+            caller=btn,
+            items=menu_items,
+            width_mult=4,
+        )
+        self.menu.open()
+
+    def set_alias(self, alias):
+        self.alias_btn.text = alias
+        self.menu.dismiss()
+
     def set_mode(self, mode, command_id=None):
         """Ρύθμιση τρόπου λειτουργίας (add/edit)."""
         self.mode = mode
         self.command_id = command_id
         self.error_lbl.text = ''
+        self.name_input.error = False # Clear error state
+        self.exec_input.error = False # Clear error state
         
         if mode == 'edit' and command_id:
+            self.toolbar.title = 'Επεξεργασία'
             cmd = database.get_command(command_id)
             if cmd:
-                self.title_lbl.text = 'Επεξεργασία'
                 self.name_input.text = cmd['name']
                 self.exec_input.text = cmd['executable']
+                self.alias_btn.text = cmd.get('alias', 'Primary')
         else:
-            self.title_lbl.text = 'Νέο Πρόσταγμα'
+            self.toolbar.title = 'Νέο Πρόσταγμα'
             self.name_input.text = ''
             self.exec_input.text = ''
+            self.alias_btn.text = 'Primary'
     
-    def go_back(self, btn):
+    def go_back(self):
         self.manager.current = 'commands_list'
     
-    def save_command(self, btn):
+    def save_command(self):
         """Αποθήκευση στη βάση."""
         name = self.name_input.text.strip()
         executable = self.exec_input.text.strip()
         
+        # Reset error states
+        self.name_input.error = False
+        self.exec_input.error = False
+        self.error_lbl.text = ''
+
         if not name:
+            self.name_input.error = True
             self.error_lbl.text = 'Το όνομα είναι υποχρεωτικό!'
             return
         if not executable:
+            self.exec_input.error = True
             self.error_lbl.text = 'Η εντολή είναι υποχρεωτική!'
             return
         
+        alias = self.alias_btn.text
+        
         if self.mode == 'add':
-            result = database.add_command(name, executable)
+            result = database.add_command(name, executable, alias)
             if result is None:
                 self.error_lbl.text = f'Το πρόσταγμα "{name}" υπάρχει ήδη!'
                 return
         else:
-            result = database.update_command(self.command_id, name, executable)
+            result = database.update_command(self.command_id, name, executable, alias)
             if not result:
                 self.error_lbl.text = 'Αποτυχία ενημέρωσης (ίσως υπάρχει ήδη αυτό το όνομα)'
                 return
@@ -636,9 +766,12 @@ class CommandEditScreen(Screen):
         self.manager.current = 'commands_list'
 
 
-# ---------- Kivy App ----------
-class VoiceSSHApp(App):
+# ---------- KivyMD App ----------
+class VoiceSSHApp(MDApp):
     def build(self):
+        self.theme_cls.primary_palette = "Blue"  # Διάλεξε χρώμα: Teal, Blue, Red, κλπ.
+        self.theme_cls.theme_style = "Light"    # ή "Dark"
+        
         # Αίτηση αδειών για Android (API 23+)
         if platform == 'android':
             request_permissions([Permission.RECORD_AUDIO, Permission.INTERNET])
@@ -651,6 +784,9 @@ class VoiceSSHApp(App):
         sm.add_widget(MainScreen(name='main'))
         sm.add_widget(CommandsListScreen(name='commands_list'))
         sm.add_widget(CommandEditScreen(name='command_edit'))
+        sm.add_widget(SettingsScreen(name='settings'))
+        sm.add_widget(ConnectionEditScreen(name='connection_edit'))
+        sm.add_widget(AboutScreen(name='about'))
         
         return sm
 
