@@ -339,6 +339,16 @@ class MainScreen(Screen):
                             RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, 'el-GR')
             intent.putExtra(RecognizerIntent.EXTRA_PROMPT, 'Πες την εντολή σου')
+            
+            # --- Ταχύτητα απόκρισης ---
+            # EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: 
+            # Χρόνος σιωπής μετά το τέλος της ομιλίας για να θεωρηθεί ολοκληρωμένη.
+            intent.putExtra('android.speech.extra.SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS', 3000)
+            
+            # EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS:
+            # Χρόνος σιωπής που μπορεί να σημαίνει το τέλος (πιο επιθετικό).
+            intent.putExtra('android.speech.extra.SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS', 2000)
+            # --------------------------
 
             app_ref = self  # Αναφορά στο MainScreen instance
 
@@ -346,17 +356,53 @@ class MainScreen(Screen):
             class RecognitionListener(PythonJavaClass):
                 __javainterfaces__ = ['android/speech/RecognitionListener']
 
+                def __init__(self, main_screen):
+                    super().__init__()
+                    self.main_screen = main_screen
+                    self.silence_timer = None
+
+                def reset_silence_timer(self):
+                    """Επαναφορά του χρονομέτρου σιωπής."""
+                    if self.silence_timer:
+                        self.silence_timer.cancel()
+                    self.silence_timer = Clock.schedule_once(self.force_stop, 5.0)
+
+                def force_stop(self, dt):
+                    """Αναγκαστική διακοπή αν περάσουν 5 δευτερόλεπτα σιωπής."""
+                    if self.main_screen.speech_recognizer:
+                        print("Force stopping recognition due to silence...")
+                        # Καλούμε το stopListening στο UI thread
+                        class StopRunnable(PythonJavaClass):
+                            __javainterfaces__ = ['java/lang/Runnable']
+                            def __init__(self, sr):
+                                super().__init__()
+                                self.sr = sr
+                            @java_method('()V')
+                            def run(self):
+                                try:
+                                    self.sr.stopListening()
+                                except:
+                                    pass
+                        stop_runnable = StopRunnable(self.main_screen.speech_recognizer)
+                        activity.runOnUiThread(stop_runnable)
+
                 @java_method('(Landroid/os/Bundle;)V')
                 def onReadyForSpeech(self, params):
                     Clock.schedule_once(lambda dt: setattr(app_ref.status_lbl, 'text', 'Έτοιμος...'), 0)
+                    # Ξεκινάμε το χρονόμετρο μόλις είναι έτοιμο το mic (fallback αν δεν μιλήσει καθόλου)
+                    Clock.schedule_once(lambda dt: self.reset_silence_timer(), 0)
 
                 @java_method('()V')
                 def onBeginningOfSpeech(self):
                     Clock.schedule_once(lambda dt: setattr(app_ref.status_lbl, 'text', 'Μιλάς...'), 0)
+                    # Μίλησε, άρα επαναφέρουμε το χρονόμετρο
+                    Clock.schedule_once(lambda dt: self.reset_silence_timer(), 0)
 
                 @java_method('(F)V')
                 def onRmsChanged(self, rmsdB):
-                    pass
+                    # Αν ο ήχος είναι πάνω από ένα επίπεδο, θεωρούμε ότι υπάρχει δραστηριότητα
+                    if rmsdB > 2.0:
+                        Clock.schedule_once(lambda dt: self.reset_silence_timer(), 0)
 
                 @java_method('(Landroid/os/Bundle;)V')
                 def onBufferReceived(self, buffer):
@@ -364,10 +410,14 @@ class MainScreen(Screen):
 
                 @java_method('()V')
                 def onEndOfSpeech(self):
+                    if self.silence_timer:
+                        self.silence_timer.cancel()
                     Clock.schedule_once(lambda dt: setattr(app_ref.status_lbl, 'text', 'Επεξεργάζομαι...'), 0)
 
                 @java_method('(I)V')
                 def onError(self, error):
+                    if self.silence_timer:
+                        self.silence_timer.cancel()
                     error_msgs = {
                         SpeechRecognizer.ERROR_AUDIO: "Σφάλμα ήχου",
                         SpeechRecognizer.ERROR_CLIENT: "Σφάλμα client",
@@ -385,6 +435,8 @@ class MainScreen(Screen):
 
                 @java_method('(Landroid/os/Bundle;)V')
                 def onResults(self, results):
+                    if self.silence_timer:
+                        self.silence_timer.cancel()
                     matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                     if matches and matches.size() > 0:
                         text = str(matches.get(0))
@@ -396,7 +448,8 @@ class MainScreen(Screen):
 
                 @java_method('(Landroid/os/Bundle;)V')
                 def onPartialResults(self, partialResults):
-                    pass
+                    # Αν έχουμε μερικά αποτελέσματα, επαναφέρουμε το χρονόμετρο
+                    Clock.schedule_once(lambda dt: self.reset_silence_timer(), 0)
 
                 @java_method('(I)V')
                 def onEvent(self, eventType, params):
@@ -428,7 +481,7 @@ class MainScreen(Screen):
                     sr.setRecognitionListener(self.listener)
                     sr.startListening(self.intent)
             
-            self.recognition_listener = RecognitionListener()
+            self.recognition_listener = RecognitionListener(self)
             self.speech_runnable = SpeechRunnable(self.recognition_listener, intent)
             
             # Εκτέλεση στο Android UI thread
