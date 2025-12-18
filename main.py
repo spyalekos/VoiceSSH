@@ -72,12 +72,12 @@ def run_remote(cmd, alias='Primary'):
         )
 
         # Ανίχνευση εντολών που ξεκινούν προγράμματα που μένουν ενεργά
-        cmd_lower = cmd.lower().strip()
-        is_background_cmd = (
-            cmd_lower.startswith('start ') or 
-            '.exe' in cmd_lower or
-            'msconfig' in cmd_lower
-        )
+        #cmd_lower = cmd.lower().strip()
+        #is_background_cmd = (
+        #    cmd_lower.startswith('start ') or
+        #    '.exe' in cmd_lower or
+        #    'msconfig' in cmd_lower
+        #)
         # Καταργώ την Ανίχνευση εντολών που ξεκινούν προγράμματα που μένουν ενεργά
         is_background_cmd=True
 
@@ -168,6 +168,7 @@ class MainScreen(Screen):
         self.menu = None
         self.tts = None
         self.tts_initialized = False
+        self.is_listening = False
         self.build_ui()
     
     def build_ui(self):
@@ -298,6 +299,10 @@ class MainScreen(Screen):
     
     def cleanup_recognizer(self):
         """Καθαρισμός του SpeechRecognizer στο UI thread"""
+        self.is_listening = False
+        self.mic_btn.icon = "microphone"
+        self.mic_btn.md_bg_color = MDApp.get_running_app().theme_cls.primary_color
+
         if platform != 'android':
             return
             
@@ -322,6 +327,12 @@ class MainScreen(Screen):
         activity.runOnUiThread(self.cleanup_runnable)
 
     def start_listening(self, *args):
+        # Αν ήδη ακούει, το πατημα του κουμπιού το σταματάει (χειροκίνητα)
+        if self.is_listening:
+            self.status_lbl.text = 'Διακοπή αναγνώρισης...'
+            self.cleanup_recognizer()
+            return
+
         if platform != 'android':
             # Testing mode - εκτέλεση δοκιμαστικής εντολής
             commands = database.get_commands_dict()
@@ -332,6 +343,9 @@ class MainScreen(Screen):
 
         try:
             self.status_lbl.text = 'Ακούω...'
+            self.is_listening = True
+            self.mic_btn.icon = "microphone-off"
+            self.mic_btn.md_bg_color = [1, 0, 0, 1] # Red when listening
             
             # Δημιουργία Intent
             intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
