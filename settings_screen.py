@@ -19,12 +19,14 @@ from kivy.metrics import dp
 import database
 import json
 import os
-from kivy.uix.filechooser import FileChooserIconView
+from kivymd.uix.filemanager import MDFileManager
 
 class SettingsScreen(Screen):
     """Screen that lists all SSH connections."""
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.file_manager = None
+        self.manager_mode = None  # 'import' or 'export'
         self.build_ui()
 
     def build_ui(self):
@@ -102,44 +104,54 @@ class SettingsScreen(Screen):
         self.refresh_list()
 
     def export_db(self):
-        """Άνοιγμα διαλόγου για επιλογή φακέλου εξαγωγής."""
-        # Προεπιλεγμένο όνομα αρχείου
-        default_name = "commands_backup.json"
-        
+        """Άνοιγμα του file manager για επιλογή φακέλου εξαγωγής."""
         path = "."
         if platform == 'android':
             from android.storage import primary_external_storage_path
             path = primary_external_storage_path()
 
-        content = MDBoxLayout(orientation='vertical', spacing=dp(10), size_hint_y=None, height=dp(400))
-        
-        file_chooser = FileChooserIconView(
-            path=path,
-            filters=["*.json"],
-            size_hint_y=1
-        )
-        content.add_widget(file_chooser)
+        self.open_file_manager(path, mode='export')
 
-        self.export_chooser_dialog = MDDialog(
-            title="Επιλογή Φακέλου Εξαγωγής",
-            type="custom",
-            content_cls=content,
-            buttons=[
-                MDRaisedButton(
-                    text="ΑΚΥΡΩΣΗ",
-                    on_release=lambda x: self.export_chooser_dialog.dismiss()
-                ),
-                MDRaisedButton(
-                    text="ΕΞΑΓΩΓΗ ΕΔΩ",
-                    on_release=lambda x: self.do_export_to_path(file_chooser.path, default_name)
-                ),
-            ],
-        )
-        self.export_chooser_dialog.open()
+    def open_file_manager(self, path, mode='import'):
+        self.manager_mode = mode
+        if not self.file_manager:
+            self.file_manager = MDFileManager(
+                exit_manager=self.exit_manager,
+                select_path=self.select_path,
+                preview=False,
+            )
+        
+        # Ρύθμιση φίλτρων ανάλογα με το mode
+        if mode == 'import':
+            self.file_manager.ext = [".json"]
+        else:
+            self.file_manager.ext = [] # Εμφάνιση όλων των φακέλων για export
+
+        self.file_manager.show(path)
+
+    def select_path(self, path):
+        """Callback όταν επιλεγεί αρχείο ή φάκελος."""
+        self.exit_manager()
+        
+        if self.manager_mode == 'export':
+            # Για export, ο χρήστης επιλέγει φάκελο
+            if os.path.isdir(path):
+                self.do_export_to_path(path, "commands_backup.json")
+            else:
+                # Αν επέλεξε αρχείο, παίρνουμε τον φάκελο του
+                self.do_export_to_path(os.path.dirname(path), "commands_backup.json")
+        else:
+            # Για import, ο χρήστης επιλέγει αρχείο
+            if os.path.isfile(path) and path.endswith('.json'):
+                self.on_file_selected_for_import([path])
+
+    def exit_manager(self, *args):
+        """Κλείσιμο του file manager."""
+        if self.file_manager:
+            self.file_manager.close()
 
     def do_export_to_path(self, directory, filename):
         """Εκτέλεση της εξαγωγής στο συγκεκριμένο path."""
-        self.export_chooser_dialog.dismiss()
         try:
             full_path = os.path.join(directory, filename)
             data = database.export_db_data()
@@ -154,44 +166,20 @@ class SettingsScreen(Screen):
             self.show_info_dialog("Σφάλμα Export", str(e))
 
     def import_db_dialog(self):
-        """Άνοιγμα διαλόγου για επιλογή αρχείου εισαγωγής."""
+        """Άνοιγμα του file manager για επιλογή αρχείου εισαγωγής."""
         path = "."
         if platform == 'android':
             from android.storage import primary_external_storage_path
             path = primary_external_storage_path()
 
-        content = MDBoxLayout(orientation='vertical', spacing=dp(10), size_hint_y=None, height=dp(400))
-        
-        file_chooser = FileChooserIconView(
-            path=path,
-            filters=["*.json"],
-            size_hint_y=1
-        )
-        content.add_widget(file_chooser)
-
-        self.import_chooser_dialog = MDDialog(
-            title="Επιλογή Αρχείου Backup (.json)",
-            type="custom",
-            content_cls=content,
-            buttons=[
-                MDRaisedButton(
-                    text="ΑΚΥΡΩΣΗ",
-                    on_release=lambda x: self.import_chooser_dialog.dismiss()
-                ),
-                MDRaisedButton(
-                    text="ΕΠΙΛΟΓΗ",
-                    on_release=lambda x: self.on_file_selected_for_import(file_chooser.selection)
-                ),
-            ],
-        )
-        self.import_chooser_dialog.open()
+        self.open_file_manager(path, mode='import')
 
     def on_file_selected_for_import(self, selection):
         """Αφού επιλεγεί αρχείο, ρωτάμε για τον τρόπο εισαγωγής."""
         if not selection:
             return
         
-        self.import_chooser_dialog.dismiss()
+        # No need to dismiss here, select_path already calls exit_manager
         selected_file = selection[0]
         
         self.import_mode_dialog = MDDialog(

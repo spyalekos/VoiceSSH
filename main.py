@@ -244,6 +244,10 @@ class MainScreen(Screen):
             except Exception as e:
                 print(f'TTS initialization failed with exception: {e}')
     
+    def on_leave(self):
+        """Clean up when leaving the screen."""
+        self.cleanup_recognizer()
+    
     def open_menu(self, btn):
         commands = database.get_all_commands()
         menu_items = []
@@ -405,12 +409,6 @@ class MainScreen(Screen):
                     Clock.schedule_once(lambda dt: setattr(app_ref.status_lbl, 'text', 'Μιλάς...'), 0)
                     # Μίλησε, άρα επαναφέρουμε το χρονόμετρο
                     Clock.schedule_once(lambda dt: self.reset_silence_timer(), 0)
-
-                @java_method('(F)V')
-                def onRmsChanged(self, rmsdB):
-                    # Αν ο ήχος είναι πάνω από ένα επίπεδο, θεωρούμε ότι υπάρχει δραστηριότητα
-                    if rmsdB > 2.0:
-                        Clock.schedule_once(lambda dt: self.reset_silence_timer(), 0)
 
                 @java_method('(Landroid/os/Bundle;)V')
                 def onBufferReceived(self, buffer):
