@@ -4,6 +4,7 @@ SQLite database module για διαχείριση προσταγμάτων (com
 """
 import sqlite3
 import os
+import json
 from kivy.utils import platform
 
 # Ορισμός path για τη βάση δεδομένων
@@ -285,3 +286,47 @@ def get_setting(key):
     if conn and key in conn:
         return conn[key]
     return None
+
+
+def export_db_data():
+    """Εξάγει όλα τα δεδομένα της βάσης σε λεξικό."""
+    return {
+        "commands": get_all_commands(),
+        "ssh_connections": get_ssh_connections()
+    }
+
+
+def import_db_data(data, mode='merge'):
+    """
+    Εισάγει δεδομένα στη βάση.
+    mode: 'merge' (προσθήκη/ενημέρωση) ή 'replace' (διαγραφή όλων πριν την εισαγωγή).
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        if mode == 'replace':
+            cursor.execute("DELETE FROM commands")
+            cursor.execute("DELETE FROM ssh_connections")
+        
+        if "commands" in data:
+            for cmd in data["commands"]:
+                cursor.execute(
+                    "INSERT OR REPLACE INTO commands (name, executable, alias) VALUES (?, ?, ?)",
+                    (cmd['name'], cmd['executable'], cmd.get('alias', DEFAULT_ALIAS))
+                )
+        
+        if "ssh_connections" in data:
+            for ssh in data["ssh_connections"]:
+                cursor.execute(
+                    "INSERT OR REPLACE INTO ssh_connections (alias, host, port, username, password) VALUES (?, ?, ?, ?, ?)",
+                    (ssh['alias'], ssh['host'], ssh['port'], ssh['username'], ssh['password'])
+                )
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"Import error: {e}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()

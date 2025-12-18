@@ -72,7 +72,7 @@ def run_remote(cmd, alias='Primary'):
         )
 
         # Ανίχνευση εντολών που ξεκινούν προγράμματα που μένουν ενεργά
-        #cmd_lower = cmd.lower().strip()
+        cmd_lower = cmd.lower().strip()
         #is_background_cmd = (
         #    cmd_lower.startswith('start ') or
         #    '.exe' in cmd_lower or
@@ -327,12 +327,6 @@ class MainScreen(Screen):
         activity.runOnUiThread(self.cleanup_runnable)
 
     def start_listening(self, *args):
-        # Αν ήδη ακούει, το πατημα του κουμπιού το σταματάει (χειροκίνητα)
-        if self.is_listening:
-            self.status_lbl.text = 'Διακοπή αναγνώρισης...'
-            self.cleanup_recognizer()
-            return
-
         if platform != 'android':
             # Testing mode - εκτέλεση δοκιμαστικής εντολής
             commands = database.get_commands_dict()
