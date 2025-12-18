@@ -833,7 +833,12 @@ class VoiceSSHApp(MDApp):
         
         # Αίτηση αδειών για Android (API 23+)
         if platform == 'android':
-            request_permissions([Permission.RECORD_AUDIO, Permission.INTERNET])
+            request_permissions([
+                Permission.RECORD_AUDIO, 
+                Permission.INTERNET,
+                Permission.READ_EXTERNAL_STORAGE,
+                Permission.WRITE_EXTERNAL_STORAGE
+            ])
         
         # Αρχικοποίηση βάσης δεδομένων
         database.init_db()

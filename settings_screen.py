@@ -107,8 +107,15 @@ class SettingsScreen(Screen):
         """Άνοιγμα του file manager για επιλογή φακέλου εξαγωγής."""
         path = "."
         if platform == 'android':
-            from android.storage import primary_external_storage_path
-            path = primary_external_storage_path()
+            try:
+                from jnius import autoclass
+                Environment = autoclass('android.os.Environment')
+                path = Environment.getExternalStoragePublicDirectory(
+                    Environment.DIRECTORY_DOCUMENTS
+                ).getAbsolutePath()
+            except Exception:
+                from android.storage import primary_external_storage_path
+                path = primary_external_storage_path()
 
         self.open_file_manager(path, mode='export')
 
@@ -169,8 +176,15 @@ class SettingsScreen(Screen):
         """Άνοιγμα του file manager για επιλογή αρχείου εισαγωγής."""
         path = "."
         if platform == 'android':
-            from android.storage import primary_external_storage_path
-            path = primary_external_storage_path()
+            try:
+                from jnius import autoclass
+                Environment = autoclass('android.os.Environment')
+                path = Environment.getExternalStoragePublicDirectory(
+                    Environment.DIRECTORY_DOCUMENTS
+                ).getAbsolutePath()
+            except Exception:
+                from android.storage import primary_external_storage_path
+                path = primary_external_storage_path()
 
         self.open_file_manager(path, mode='import')
 
