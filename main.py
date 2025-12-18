@@ -277,17 +277,17 @@ class MainScreen(Screen):
         self.output_lbl.text = f'⚙️ Εκτέλεση: {cmd_data["executable"]} (@{cmd_data["alias"]})\n\n'
         
         # Run in thread or schedule logic if needed, simple call for now
-        Clock.schedule_once(lambda dt: self._run_cmd(cmd_data['executable'], cmd_data['alias']), 0.1)
+        Clock.schedule_once(lambda dt: self._run_cmd(cmd_data['executable'], cmd_data['alias'], cmd_data['name']), 0.1)
 
-    def _run_cmd(self, executable, alias='Primary'):
+    def _run_cmd(self, executable, alias='Primary', cmd_name=''):
         output = run_remote(executable, alias)
         self.output_lbl.text += f'Output:\n{output}'
         
         # Voice feedback based on command result
         if '❌' in output or 'σφάλμα' in output.lower() or 'error' in output.lower():
-            self.speak_text('η εντολή απέτυχε')
+            self.speak_text('υπάρχει πρόβλημα')
         else:
-            self.speak_text('η εντολή εκτελέστηκε με επιτυχία')
+            self.speak_text(f'η εντολή {cmd_name} εκτελέστηκε επιτυχώς')
     
     def go_to_commands_list(self, btn):
         """Μετάβαση στη λίστα προσταγμάτων."""
@@ -340,6 +340,7 @@ class MainScreen(Screen):
             return
 
         try:
+            self.speak_text('πείτε μου')
             self.status_lbl.text = 'Ακούω...'
             self.is_listening = True
             self.mic_btn.icon = "microphone-off"
@@ -581,10 +582,11 @@ class MainScreen(Screen):
 
         cmd_exec = cmd_details['executable']
         cmd_alias = cmd_details['alias']
+        cmd_name = cmd_details['name']
 
         self.output_lbl.text = f'⚙️ Εκτέλεση: {cmd_exec} (@{cmd_alias})\n\n'
         # Αποστολή SSH
-        Clock.schedule_once(lambda dt: self._run_cmd(cmd_exec, cmd_alias), 0.1)
+        Clock.schedule_once(lambda dt: self._run_cmd(cmd_exec, cmd_alias, cmd_name), 0.1)
 
 
 class CommandsListScreen(Screen):
