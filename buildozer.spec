@@ -29,7 +29,7 @@ source.include_exts = py,png,jpg,kv,atlas
 #source.exclude_patterns = license,images/*/*.jpg
 
 # (str) Application versioning (method 1)
-version = 0.970
+version = 0.974
 
 # (str) Application versioning (method 2)
 # version.regex = __version__ = ['"](.*)['"]
@@ -62,6 +62,7 @@ orientation = portrait
 
 #
 # author = © Copyright Info
+author = SpyAlekos
 
 # change the major version of python used by the app
 osx.python_version = 3

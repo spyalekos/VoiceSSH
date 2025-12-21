@@ -41,6 +41,7 @@ if platform == 'android':
     # Text-to-Speech classes
     TextToSpeech = autoclass('android.speech.tts.TextToSpeech')
     Locale = autoclass('java.util.Locale')
+    Bundle = autoclass('android.os.Bundle')
 
 # ---------- Constants ----------
 
@@ -71,13 +72,7 @@ def run_remote(cmd, alias='Primary'):
             banner_timeout=10  # SSH banner timeout
         )
 
-        # Ανίχνευση εντολών που ξεκινούν προγράμματα που μένουν ενεργά
         cmd_lower = cmd.lower().strip()
-        #is_background_cmd = (
-        #    cmd_lower.startswith('start ') or
-        #    '.exe' in cmd_lower or
-        #    'msconfig' in cmd_lower
-        #)
         # Καταργώ την Ανίχνευση εντολών που ξεκινούν προγράμματα που μένουν ενεργά
         is_background_cmd=True
 
@@ -128,20 +123,7 @@ def run_remote(cmd, alias='Primary'):
             except Exception as psexec_err:
                 client.close()
                 return f"⚠️ Exception στο psexec: {psexec_err}"
-        else:
-            # Για κανονικές εντολές που τερματίζουν, περιμένουμε το αποτέλεσμα
-            stdin, stdout, stderr = client.exec_command(cmd, timeout=25)
 
-            output = stdout.read().decode('utf-8', errors='ignore').strip()
-            error = stderr.read().decode('utf-8', errors='ignore').strip()
-
-            client.close()
-
-            if error:
-                 return f"Error output:\n{error}\n\nStandard output:\n{output}"
-            
-            return output if output else "Εντολή εκτελέστηκε (χωρίς έξοδο)"
-        
     except paramiko.AuthenticationException:
         return f'❌ SSH Error: Λάθος username ή password για {HOST}'
     except paramiko.SSHException as ssh_err:
@@ -225,7 +207,8 @@ class MainScreen(Screen):
             icon="microphone",
             type="large",
             pos_hint={'center_x': 0.5},
-            md_bg_color=MDApp.get_running_app().theme_cls.primary_color
+            md_bg_color=MDApp.get_running_app().theme_cls.primary_color,
+            disabled=True if platform == 'android' else False  # Disable until TTS is ready
         )
         self.mic_btn.bind(on_release=self.start_listening)
         fab_layout.add_widget(self.mic_btn)
@@ -284,9 +267,17 @@ class MainScreen(Screen):
         self.output_lbl.text += f'Output:\n{output}'
         
         # Voice feedback based on command result
-        if '❌' in output or 'σφάλμα' in output.lower() or 'error' in output.lower():
+        # Check for failure indicators first
+        if ('❌' in output or '⚠️' in output or 
+            'σφάλμα' in output.lower() or 'error' in output.lower() or
+            'denied' in output.lower() or 'αποτυχία' in output.lower() or
+            'exception' in output.lower()):
             self.speak_text('υπάρχει πρόβλημα')
+        # Check for success indicators
+        elif '✓' in output or 'επιτυχώς' in output.lower() or 'εκτελέστηκε' in output.lower():
+            self.speak_text(f'η εντολή {cmd_name} εκτελέστηκε επιτυχώς')
         else:
+            # Default to success if no clear error indicators
             self.speak_text(f'η εντολή {cmd_name} εκτελέστηκε επιτυχώς')
     
     def go_to_commands_list(self, btn):
@@ -340,7 +331,22 @@ class MainScreen(Screen):
             return
 
         try:
-            self.speak_text('πείτε μου')
+            if platform == 'android' and not self.tts_initialized:
+                self.status_lbl.text = 'Το TTS δεν είναι έτοιμο...'
+                return
+
+            self.speak_text('σας ακούω')
+            self.status_lbl.text = 'Προετοιμασία...'
+            
+            # Μικρή καθυστέρηση για να ακουστεί το "σας ακούω" πριν το beep του SpeechRecognizer
+            Clock.schedule_once(lambda dt: self._actually_start_listening(), 0.8)
+
+        except Exception as e:
+            self.status_lbl.text = f'Εξαίρεση: {str(e)}'
+            self.output_lbl.text = f'Σφάλμα κατά την εκκίνηση: {str(e)}'
+
+    def _actually_start_listening(self):
+        try:
             self.status_lbl.text = 'Ακούω...'
             self.is_listening = True
             self.mic_btn.icon = "microphone-off"
@@ -506,32 +512,59 @@ class MainScreen(Screen):
         try:
             app_ref = self
             
-            def on_tts_ready(success):
+            def on_tts_ready(success, lang_result=None):
                 """Called on Kivy main thread when TTS is ready."""
                 if success:
+                    print('✓ TTS initialized successfully')
                     app_ref.tts_initialized = True
-                    try:
-                        # Set Greek language
-                        locale = Locale('el', 'GR')
-                        result = app_ref.tts.setLanguage(locale)
-                        if result == TextToSpeech.LANG_MISSING_DATA or result == TextToSpeech.LANG_NOT_SUPPORTED:
-                            print('Greek language not supported for TTS')
-                    except Exception as e:
-                        print(f'TTS setLanguage error: {e}')
+                    
+                    # Check language result
+                    if lang_result is not None:
+                        if lang_result == TextToSpeech.LANG_MISSING_DATA:
+                            print('⚠️ Greek language data missing for TTS')
+                            app_ref.status_lbl.text = 'Ελληνικά TTS: δεδομένα λείπουν'
+                        elif lang_result == TextToSpeech.LANG_NOT_SUPPORTED:
+                            print('⚠️ Greek language not supported for TTS')
+                            app_ref.status_lbl.text = 'Ελληνικά TTS δεν υποστηρίζονται'
+                        else:
+                            print('✓ Greek language set successfully')
+                            app_ref.status_lbl.text = 'TTS Έτοιμο - Πάτα το μικρόφωνο'
+                            # Test TTS with a short phrase
+                            Clock.schedule_once(lambda dt: app_ref.speak_text('έτοιμο'), 1.0)
+                    
+                    app_ref.mic_btn.disabled = False
                 else:
-                    print('TTS initialization failed')
+                    print('❌ TTS initialization failed')
+                    app_ref.status_lbl.text = 'Αποτυχία TTS'
             
             class TTSListener(PythonJavaClass):
                 __javainterfaces__ = ['android/speech/tts/TextToSpeech$OnInitListener']
                 
                 @java_method('(I)V')
                 def onInit(self, status):
-                    # Use Clock.schedule_once to run on Kivy's main thread
                     try:
+                        print(f'TTS onInit called with status: {status}')
                         success = (status == TextToSpeech.SUCCESS)
-                        Clock.schedule_once(lambda dt: on_tts_ready(success), 0)
+                        
+                        if success:
+                            # Set Greek language
+                            locale = Locale('el', 'GR')
+                            lang_result = app_ref.tts.setLanguage(locale)
+                            print(f'TTS setLanguage result: {lang_result}')
+                            
+                            # Configure TTS settings
+                            app_ref.tts.setPitch(1.0)  # Normal pitch
+                            app_ref.tts.setSpeechRate(1.0)  # Normal speed
+                            print('TTS pitch and rate configured')
+                            
+                            Clock.schedule_once(lambda dt: on_tts_ready(True, lang_result), 0)
+                        else:
+                            Clock.schedule_once(lambda dt: on_tts_ready(False), 0)
                     except Exception as e:
-                        print(f'TTS onInit exception: {e}')
+                        print(f'❌ TTS onInit exception: {e}')
+                        import traceback
+                        traceback.print_exc()
+                        Clock.schedule_once(lambda dt: on_tts_ready(False), 0)
             
             # Create a Runnable to initialize TTS on Android UI thread
             class TTSInitRunnable(PythonJavaClass):
@@ -545,9 +578,13 @@ class MainScreen(Screen):
                 @java_method('()V')
                 def run(self):
                     try:
+                        print('Creating TTS instance...')
                         self.app.tts = TextToSpeech(activity, self.listener)
+                        print('TTS instance created')
                     except Exception as e:
-                        print(f'TTS creation error: {e}')
+                        print(f'❌ TTS creation error: {e}')
+                        import traceback
+                        traceback.print_exc()
             
             # Keep reference to prevent garbage collection
             self._tts_listener = TTSListener()
@@ -555,18 +592,73 @@ class MainScreen(Screen):
             activity.runOnUiThread(self.tts_init_runnable)
             
         except Exception as e:
-            print(f'TTS initialization error: {e}')
+            print(f'❌ TTS initialization error: {e}')
+            import traceback
+            traceback.print_exc()
     
     def speak_text(self, text):
         """Speak text using Android TTS."""
-        if platform != 'android' or not self.tts or not self.tts_initialized:
+        if platform != 'android':
+            print(f'[DEBUG] Cannot speak on {platform} platform: "{text}"')
+            return
+        
+        if not self.tts:
+            print('❌ TTS object is None, cannot speak')
+            return
+            
+        if not self.tts_initialized:
+            print('❌ TTS not initialized yet, cannot speak')
             return
         
         try:
-            self.tts.speak(text, TextToSpeech.QUEUE_FLUSH, None, None)
+            print(f'🔊 Attempting to speak: "{text}"')
+            
+            # Create a Runnable to speak on Android UI thread
+            class TTSSpeakRunnable(PythonJavaClass):
+                __javainterfaces__ = ['java/lang/Runnable']
+                
+                def __init__(self, tts_obj, text_to_speak):
+                    super().__init__()
+                    self.tts_obj = tts_obj
+                    self.text_to_speak = text_to_speak
+                
+                @java_method('()V')
+                def run(self):
+                    try:
+                        print(f'In TTS runnable, about to call speak() for: "{self.text_to_speak}"')
+                        
+                        # Use HashMap instead of Bundle for parameters
+                        HashMap = autoclass('java.util.HashMap')
+                        params = HashMap()
+                        
+                        # Use the 3-parameter speak() method (deprecated but widely compatible)
+                        # speak(String text, int queueMode, HashMap<String, String> params)
+                        result = self.tts_obj.speak(
+                            self.text_to_speak, 
+                            TextToSpeech.QUEUE_FLUSH, 
+                            params
+                        )
+                        
+                        if result == TextToSpeech.SUCCESS:
+                            print(f'✓ TTS speak() returned SUCCESS for: "{self.text_to_speak}"')
+                        elif result == TextToSpeech.ERROR:
+                            print(f'❌ TTS speak() returned ERROR for: "{self.text_to_speak}"')
+                        else:
+                            print(f'⚠️ TTS speak() returned unknown code {result} for: "{self.text_to_speak}"')
+                            
+                    except Exception as e:
+                        print(f'❌ TTS speak error in runnable: {e}')
+                        import traceback
+                        traceback.print_exc()
+            
+            speak_runnable = TTSSpeakRunnable(self.tts, text)
+            activity.runOnUiThread(speak_runnable)
+            print(f'TTS speak runnable submitted to UI thread')
+            
         except Exception as e:
-            print(f'TTS speak error: {e}')
-
+            print(f'❌ TTS speak error: {e}')
+            import traceback
+            traceback.print_exc()
     def handle_command(self, recognized_text):
         self.status_lbl.text = f'Αναγνωρίστηκε: "{recognized_text}"'
         # Συνήθης προσαρμογή για ελληνική ορθογραφία
