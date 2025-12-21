@@ -40,22 +40,16 @@ def init_db():
     conn = get_connection()
     cursor = conn.cursor()
     
-    # 1. Πίνακας commands
+    # 1. Πίνακας commands (χωρίς alias column πια)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS commands (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT UNIQUE NOT NULL,
             executable TEXT NOT NULL,
-            alias TEXT DEFAULT 'Primary',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     
-    # Check if 'alias' column exists in commands (Migration)
-    cursor.execute("PRAGMA table_info(commands)")
-    columns = [info[1] for info in cursor.fetchall()]
-    if 'alias' not in columns:
-        cursor.execute(f"ALTER TABLE commands ADD COLUMN alias TEXT DEFAULT '{DEFAULT_ALIAS}'")
 
     # 2. Πίνακας ssh_connections (Settings)
     cursor.execute('''
@@ -101,16 +95,80 @@ def init_db():
         except Exception as e:
             print(f"Migration error: {e}")
 
-    # 4. Default commands αν ο πίνακας commands είναι κενός
+    # 4. Πίνακας command_servers (many-to-many σχέση)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS command_servers (
+            command_id INTEGER NOT NULL,
+            ssh_alias TEXT NOT NULL,
+            PRIMARY KEY (command_id, ssh_alias),
+            FOREIGN KEY (command_id) REFERENCES commands(id) ON DELETE CASCADE,
+            FOREIGN KEY (ssh_alias) REFERENCES ssh_connections(alias) ON DELETE CASCADE
+        )
+    ''')
+    
+    # 5. Migration: Μεταφορά δεδομένων από commands.alias → command_servers
+    # Ελέγχουμε αν υπάρχει ακόμα η στήλη alias στον πίνακα commands
+    cursor.execute("PRAGMA table_info(commands)")
+    columns = [info[1] for info in cursor.fetchall()]
+    
+    if 'alias' in columns:
+        # Έχουμε παλιά δομή, πρέπει να μεταφέρουμε τα δεδομένα
+        print("Migrating command-server relationships to command_servers table...")
+        
+        # Διαβάζουμε όλα τα commands με το alias τους
+        cursor.execute('SELECT id, alias FROM commands')
+        old_commands = cursor.fetchall()
+        
+        for cmd in old_commands:
+            cmd_id = cmd[0]
+            alias = cmd[1] or DEFAULT_ALIAS
+            
+            # Προσθέτουμε στον command_servers πίνακα
+            try:
+                cursor.execute(
+                    'INSERT OR IGNORE INTO command_servers (command_id, ssh_alias) VALUES (?, ?)',
+                    (cmd_id, alias)
+                )
+            except Exception as e:
+                print(f"Warning: Could not migrate command {cmd_id}: {e}")
+        
+        # Τώρα αφαιρούμε τη στήλη alias από τον πίνακα commands
+        # Στο SQLite δεν μπορούμε να κάνουμε DROP COLUMN απευθείας,
+        # πρέπει να δημιουργήσουμε νέο πίνακα και να αντιγράψουμε τα δεδομένα
+        cursor.execute('''
+            CREATE TABLE commands_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                executable TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Αντιγραφή δεδομένων
+        cursor.execute('INSERT INTO commands_new (id, name, executable, created_at) SELECT id, name, executable, created_at FROM commands')
+        
+        # Διαγραφή παλιού πίνακα και μετονομασία του νέου
+        cursor.execute('DROP TABLE commands')
+        cursor.execute('ALTER TABLE commands_new RENAME TO commands')
+        
+        print("Migration completed successfully!")
+    
+    # 6. Default commands αν ο πίνακας commands είναι κενός
     cursor.execute('SELECT COUNT(*) FROM commands')
     if cursor.fetchone()[0] == 0:
         for name, executable in DEFAULT_COMMANDS.items():
             cursor.execute(
-                'INSERT INTO commands (name, executable, alias) VALUES (?, ?, ?)',
-                (name, executable, DEFAULT_ALIAS)
+                'INSERT INTO commands (name, executable) VALUES (?, ?)',
+                (name, executable)
+            )
+            cmd_id = cursor.lastrowid
+            # Προσθήκη στον command_servers με το default alias
+            cursor.execute(
+                'INSERT INTO command_servers (command_id, ssh_alias) VALUES (?, ?)',
+                (cmd_id, DEFAULT_ALIAS)
             )
 
-    # 5. Default SSH connection αν ο πίνακας είναι κενός
+    # 7. Default SSH connection αν ο πίνακας είναι κενός
     cursor.execute('SELECT COUNT(*) FROM ssh_connections')
     if cursor.fetchone()[0] == 0:
         cursor.execute(
@@ -125,27 +183,41 @@ def init_db():
 
 def get_all_commands():
     """
-    Επιστρέφει όλα τα προστάγματα.
-    Returns: [{'id': 1, 'name': 'foo', 'executable': 'bar', 'alias': 'Primary'}, ...]
+    Επιστρέφει όλα τα προστάγματα με τους servers τους.
+    Returns: [{'id': 1, 'name': 'foo', 'executable': 'bar', 'aliases': ['Primary', 'Secondary']}, ...]
     """
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT id, name, executable, alias FROM commands ORDER BY name')
+    cursor.execute('SELECT id, name, executable FROM commands ORDER BY name')
     rows = cursor.fetchall()
+    
+    commands = []
+    for row in rows:
+        cmd = dict(row)
+        # Προσθήκη των aliases για κάθε command
+        cmd['aliases'] = get_command_servers(cmd['id'])
+        commands.append(cmd)
+    
     conn.close()
-    return [dict(row) for row in rows]
+    return commands
 
 
 def get_command_details(name):
     """
-    Επιστρέφει τις λεπτομέρειες ενός προστάγματος (μαζί με το executable και το alias).
+    Επιστρέφει τις λεπτομέρειες ενός προστάγματος με τη λίστα των servers του.
+    Returns: {'id': 1, 'name': 'foo', 'executable': 'bar', 'aliases': ['Primary', 'Secondary']}
     """
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT name, executable, alias FROM commands WHERE name = ?', (name,))
+    cursor.execute('SELECT id, name, executable FROM commands WHERE name = ?', (name,))
     row = cursor.fetchone()
     conn.close()
-    return dict(row) if row else None
+    
+    if row:
+        cmd = dict(row)
+        cmd['aliases'] = get_command_servers(cmd['id'])
+        return cmd
+    return None
     
 def get_commands_dict():
     """
@@ -164,38 +236,69 @@ def get_command(command_id):
     """Επιστρέφει ένα πρόσταγμα με βάση το ID."""
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT id, name, executable, alias FROM commands WHERE id = ?', (command_id,))
+    cursor.execute('SELECT id, name, executable FROM commands WHERE id = ?', (command_id,))
     row = cursor.fetchone()
     conn.close()
-    return dict(row) if row else None
+    
+    if row:
+        cmd = dict(row)
+        cmd['aliases'] = get_command_servers(cmd['id'])
+        return cmd
+    return None
 
 
-def add_command(name, executable, alias):
-    """Προσθέτει νέο πρόσταγμα."""
+def add_command(name, executable, aliases):
+    """
+    Προσθέτει νέο πρόσταγμα.
+    aliases: λίστα από alias strings, π.χ. ['Primary', 'Secondary']
+    """
     try:
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute(
-            'INSERT INTO commands (name, executable, alias) VALUES (?, ?, ?)',
-            (name.strip().lower(), executable.strip(), alias.strip())
+            'INSERT INTO commands (name, executable) VALUES (?, ?)',
+            (name.strip().lower(), executable.strip())
         )
-        conn.commit()
         new_id = cursor.lastrowid
+        
+        # Προσθήκη των server associations
+        for alias in aliases:
+            cursor.execute(
+                'INSERT INTO command_servers (command_id, ssh_alias) VALUES (?, ?)',
+                (new_id, alias.strip())
+            )
+        
+        conn.commit()
         conn.close()
         return new_id
     except sqlite3.IntegrityError:
         return None
 
 
-def update_command(command_id, name, executable, alias):
-    """Ενημερώνει υπάρχον πρόσταγμα."""
+def update_command(command_id, name, executable, aliases):
+    """
+    Ενημερώνει υπάρχον πρόσταγμα.
+    aliases: λίστα από alias strings
+    """
     try:
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute(
-            'UPDATE commands SET name = ?, executable = ?, alias = ? WHERE id = ?',
-            (name.strip().lower(), executable.strip(), alias.strip(), command_id)
+            'UPDATE commands SET name = ?, executable = ? WHERE id = ?',
+            (name.strip().lower(), executable.strip(), command_id)
         )
+        
+        # Ενημέρωση των server associations (inline για να μοιραστούν το ίδιο transaction)
+        # Διαγραφή υφιστάμενων associations
+        cursor.execute('DELETE FROM command_servers WHERE command_id = ?', (command_id,))
+        
+        # Προσθήκη νέων associations
+        for alias in aliases:
+            cursor.execute(
+                'INSERT INTO command_servers (command_id, ssh_alias) VALUES (?, ?)',
+                (command_id, alias.strip())
+            )
+        
         conn.commit()
         affected = cursor.rowcount
         conn.close()
@@ -208,11 +311,46 @@ def delete_command(command_id):
     """Διαγράφει πρόσταγμα."""
     conn = get_connection()
     cursor = conn.cursor()
+    # Το ON DELETE CASCADE θα διαγράψει αυτόματα και τα command_servers records
     cursor.execute('DELETE FROM commands WHERE id = ?', (command_id,))
     conn.commit()
     affected = cursor.rowcount
     conn.close()
     return affected > 0
+
+
+def get_command_servers(command_id):
+    """
+    Επιστρέφει λίστα με τα aliases των SSH servers για μια συγκεκριμένη εντολή.
+    Returns: ['Primary', 'Secondary', ...]
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        'SELECT ssh_alias FROM command_servers WHERE command_id = ? ORDER BY ssh_alias',
+        (command_id,)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [row[0] for row in rows]
+
+
+def update_command_servers(conn, cursor, command_id, aliases):
+    """
+    Ενημερώνει τους SSH servers για μια εντολή.
+    Χρησιμοποιεί υπάρχον connection και cursor για transaction safety.
+    aliases: λίστα από alias strings
+    """
+    # Διαγραφή υφιστάμενων associations
+    cursor.execute('DELETE FROM command_servers WHERE command_id = ?', (command_id,))
+    
+    # Προσθήκη νέων associations
+    for alias in aliases:
+        cursor.execute(
+            'INSERT INTO command_servers (command_id, ssh_alias) VALUES (?, ?)',
+            (command_id, alias.strip())
+        )
+
 
 
 # --- SSH Connection Managment ---
@@ -305,15 +443,9 @@ def import_db_data(data, mode='merge'):
     cursor = conn.cursor()
     try:
         if mode == 'replace':
+            cursor.execute("DELETE FROM command_servers")
             cursor.execute("DELETE FROM commands")
             cursor.execute("DELETE FROM ssh_connections")
-        
-        if "commands" in data:
-            for cmd in data["commands"]:
-                cursor.execute(
-                    "INSERT OR REPLACE INTO commands (name, executable, alias) VALUES (?, ?, ?)",
-                    (cmd['name'], cmd['executable'], cmd.get('alias', DEFAULT_ALIAS))
-                )
         
         if "ssh_connections" in data:
             for ssh in data["ssh_connections"]:
@@ -322,11 +454,55 @@ def import_db_data(data, mode='merge'):
                     (ssh['alias'], ssh['host'], ssh['port'], ssh['username'], ssh['password'])
                 )
         
+        if "commands" in data:
+            for cmd in data["commands"]:
+                # Έλεγχος αν υπάρχει ήδη το command (για merge mode)
+                cursor.execute("SELECT id FROM commands WHERE name = ?", (cmd['name'],))
+                existing = cursor.fetchone()
+                
+                if existing:
+                    cmd_id = existing[0]
+                    cursor.execute(
+                        "UPDATE commands SET executable = ? WHERE id = ?",
+                        (cmd['executable'], cmd_id)
+                    )
+                else:
+                    cursor.execute(
+                        "INSERT INTO commands (name, executable) VALUES (?, ?)",
+                        (cmd['name'], cmd['executable'])
+                    )
+                    cmd_id = cursor.lastrowid
+                
+                # Ενημέρωση των server associations
+                # Υποστήριξη παλιάς δομής (με 'alias') και νέας (με 'aliases')
+                if 'aliases' in cmd and cmd['aliases']:
+                    # Νέα δομή
+                    aliases = cmd['aliases']
+                elif 'alias' in cmd:
+                    # Παλιά δομή - backward compatibility
+                    aliases = [cmd['alias']]
+                else:
+                    # Fallback στο default
+                    aliases = [DEFAULT_ALIAS]
+                
+                # Διαγραφή υφιστάμενων associations
+                cursor.execute('DELETE FROM command_servers WHERE command_id = ?', (cmd_id,))
+                
+                # Προσθήκη νέων associations
+                for alias in aliases:
+                    cursor.execute(
+                        'INSERT OR IGNORE INTO command_servers (command_id, ssh_alias) VALUES (?, ?)',
+                        (cmd_id, alias)
+                    )
+        
         conn.commit()
         return True
     except Exception as e:
         print(f"Import error: {e}")
+        import traceback
+        traceback.print_exc()
         conn.rollback()
         return False
     finally:
         conn.close()
+

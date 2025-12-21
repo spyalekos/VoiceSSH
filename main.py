@@ -257,27 +257,69 @@ class MainScreen(Screen):
         """Εκτέλεση εντολής από το dropdown."""
         self.menu.dismiss()
         self.status_lbl.text = f'Εκτέλεση: {cmd_data["name"]}'
-        self.output_lbl.text = f'⚙️ Εκτέλεση: {cmd_data["executable"]} (@{cmd_data["alias"]})\n\n'
+        
+        aliases = cmd_data.get('aliases', ['Primary'])
+        aliases_str = ', '.join(aliases)
+        self.output_lbl.text = f'⛙️ Εκτέλεση: {cmd_data["executable"]} (@{aliases_str})\n\n'
         
         # Run in thread or schedule logic if needed, simple call for now
-        Clock.schedule_once(lambda dt: self._run_cmd(cmd_data['executable'], cmd_data['alias'], cmd_data['name']), 0.1)
+        Clock.schedule_once(lambda dt: self._run_cmd(cmd_data['executable'], aliases, cmd_data['name']), 0.1)
 
-    def _run_cmd(self, executable, alias='Primary', cmd_name=''):
-        output = run_remote(executable, alias)
-        self.output_lbl.text += f'Output:\n{output}'
+    def _run_cmd(self, executable, aliases, cmd_name=''):
+        """
+        Εκτελεί μια εντολή σε έναν ή περισσότερους SSH servers.
+        aliases: λίστα από alias strings (π.χ. ['Primary', 'Secondary'])
+        """
+        import threading
+        
+        # Αν είναι string αντί για λίστα (backward compatibility)
+        if isinstance(aliases, str):
+            aliases = [aliases]
+        
+        results = {}
+        threads = []
+        
+        def execute_on_server(alias):
+            """Εκτέλεση σε έναν συγκεκριμένο server."""
+            output = run_remote(executable, alias)
+            results[alias] = output
+        
+        # Δημιουργία thread για κάθε server
+        for alias in aliases:
+            thread = threading.Thread(target=execute_on_server, args=(alias,))
+            threads.append(thread)
+            thread.start()
+        
+        # Αναμονή όλων των threads
+        for thread in threads:
+            thread.join()
+        
+        # Εμφάνιση αποτελεσμάτων
+        output_text = ''
+        all_success = True
+        any_error= False
+        
+        for alias in aliases:
+            output = results.get(alias, '❌ Κανένα αποτέλεσμα')
+            if len(aliases) > 1:
+                output_text += f'\n─── Server: {alias} ───\n{output}\n'
+            else:
+                output_text += f'{output}\n'
+            
+            # Έλεγχος για errors
+            if ('❌' in output or '⚠️' in output or 
+                'σφάλμα' in output.lower() or 'error' in output.lower() or
+                'denied' in output.lower() or 'αποτυχία' in output.lower() or
+                'exception' in output.lower()):
+                any_error = True
+                all_success = False
+        
+        self.output_lbl.text += f'Output:\n{output_text}'
         
         # Voice feedback based on command result
-        # Check for failure indicators first
-        if ('❌' in output or '⚠️' in output or 
-            'σφάλμα' in output.lower() or 'error' in output.lower() or
-            'denied' in output.lower() or 'αποτυχία' in output.lower() or
-            'exception' in output.lower()):
+        if any_error:
             self.speak_text('υπάρχει πρόβλημα')
-        # Check for success indicators
-        elif '✓' in output or 'επιτυχώς' in output.lower() or 'εκτελέστηκε' in output.lower():
-            self.speak_text(f'η εντολή {cmd_name} εκτελέστηκε επιτυχώς')
         else:
-            # Default to success if no clear error indicators
             self.speak_text(f'η εντολή {cmd_name} εκτελέστηκε επιτυχώς')
     
     def go_to_commands_list(self, btn):
@@ -665,7 +707,6 @@ class MainScreen(Screen):
         recognized_text = recognized_text.strip().lower()
         
         # Χρήση βάσης δεδομένων
-        # Χρήση βάσης δεδομένων
         cmd_details = database.get_command_details(recognized_text)
         
         if cmd_details is None:
@@ -673,12 +714,14 @@ class MainScreen(Screen):
             return
 
         cmd_exec = cmd_details['executable']
-        cmd_alias = cmd_details['alias']
+        cmd_aliases = cmd_details.get('aliases', ['Primary'])
         cmd_name = cmd_details['name']
-
-        self.output_lbl.text = f'⚙️ Εκτέλεση: {cmd_exec} (@{cmd_alias})\n\n'
+        
+        aliases_str = ', '.join(cmd_aliases)
+        self.output_lbl.text = f'⛙️ Εκτέλεση: {cmd_exec} (@{aliases_str})\n\n'
+        
         # Αποστολή SSH
-        Clock.schedule_once(lambda dt: self._run_cmd(cmd_exec, cmd_alias, cmd_name), 0.1)
+        Clock.schedule_once(lambda dt: self._run_cmd(cmd_exec, cmd_aliases, cmd_name), 0.1)
 
 
 class CommandsListScreen(Screen):
@@ -715,10 +758,11 @@ class CommandsListScreen(Screen):
         commands = database.get_all_commands()
         
         for cmd in commands:
+            aliases_str = ', '.join(cmd.get('aliases', ['Primary']))
             # Custom item with icons
             item = TwoLineAvatarIconListItem(
                 text=cmd['name'],
-                secondary_text=f"{cmd['executable']} ({cmd['alias']})",
+                secondary_text=f"{cmd['executable']} (@{aliases_str})",
                 on_release=lambda x, c=cmd: self.edit_command(c['id'])
             )
             
@@ -786,7 +830,7 @@ class CommandEditScreen(Screen):
         super().__init__(**kwargs)
         self.mode = 'add'
         self.command_id = None
-        self.menu = None
+        self.server_checkboxes = {}  # Διεύθυνση {alias: checkbox_widget}
         self.build_ui()
     
     def build_ui(self):
@@ -818,15 +862,20 @@ class CommandEditScreen(Screen):
         )
         form.add_widget(self.exec_input)
         
-        # Alias Selector
-        self.alias_btn = MDRectangleFlatIconButton(
-            text="Primary",
-            icon="server",
-            size_hint_x=1,
-            pos_hint={'center_x': 0.5}
+        # SSH Servers Selector (Αντικατάσταση του alias_btn)
+        servers_label = MDLabel(
+            text="Επιλέξτε SSH Servers:",
+            size_hint_y=None,
+            height=dp(30),
+            theme_text_color="Secondary"
         )
-        self.alias_btn.bind(on_release=self.open_alias_menu)
-        form.add_widget(self.alias_btn)
+        form.add_widget(servers_label)
+        
+        # ScrollView για τα checkboxes
+        servers_scroll = MDScrollView(size_hint_y=None, height=dp(150))
+        self.servers_list = MDList()
+        servers_scroll.add_widget(self.servers_list)
+        form.add_widget(servers_scroll)
         
         self.error_lbl = MDLabel(
             text='',
@@ -839,27 +888,48 @@ class CommandEditScreen(Screen):
         
         layout.add_widget(form)
         self.add_widget(layout)
+        
+        # Φόρτωση servers και δημιουργία checkbox (on_enter θα ανανεώνει)
+        self.refresh_servers_list()
     
-    def open_alias_menu(self, btn):
-        aliases = database.get_connection_aliases()
-        menu_items = [
-            {
-                "viewclass": "OneLineListItem",
-                "text": alias,
-                "on_release": lambda x=alias: self.set_alias(x),
-            } for alias in aliases
-        ]
-        self.menu = MDDropdownMenu(
-            caller=btn,
-            items=menu_items,
-            width_mult=4,
-        )
-        self.menu.open()
-
-    def set_alias(self, alias):
-        self.alias_btn.text = alias
-        self.menu.dismiss()
-
+    
+    def refresh_servers_list(self):
+        """Φόρτωση των SSH servers και δημιουργία checkboxes."""
+        from kivymd.uix.selectioncontrol import MDCheckbox
+        from kivymd.uix.boxlayout import MDBoxLayout
+        
+        self.servers_list.clear_widgets()
+        self.server_checkboxes.clear()
+        
+        servers = database.get_ssh_connections()
+        
+        for server in servers:
+            alias = server['alias']
+            
+            # Container για checkbox + label
+            item_box = MDBoxLayout(
+                orientation='horizontal',
+                adaptive_height=True,
+                spacing=dp(10),
+                padding=[dp(10), dp(5)]
+            )
+            
+            checkbox = MDCheckbox(
+                size_hint=(None, None),
+                size=(dp(40), dp(40))
+            )
+            self.server_checkboxes[alias] = checkbox
+            
+            label = MDLabel(
+                text=f"{alias} ({server['host']}:{server['port']})",
+                size_hint_y=None,
+                height=dp(40)
+            )
+            
+            item_box.add_widget(checkbox)
+            item_box.add_widget(label)
+            self.servers_list.add_widget(item_box)
+    
     def set_mode(self, mode, command_id=None):
         """Ρύθμιση τρόπου λειτουργίας (add/edit)."""
         self.mode = mode
@@ -868,18 +938,29 @@ class CommandEditScreen(Screen):
         self.name_input.error = False # Clear error state
         self.exec_input.error = False # Clear error state
         
+        # Αποεπιλογή όλων των checkboxes
+        for checkbox in self.server_checkboxes.values():
+            checkbox.active = False
+        
         if mode == 'edit' and command_id:
             self.toolbar.title = 'Επεξεργασία'
             cmd = database.get_command(command_id)
             if cmd:
                 self.name_input.text = cmd['name']
                 self.exec_input.text = cmd['executable']
-                self.alias_btn.text = cmd.get('alias', 'Primary')
+                
+                # Επιλογή των σωστών checkboxes
+                selected_aliases = cmd.get('aliases', [])
+                for alias in selected_aliases:
+                    if alias in self.server_checkboxes:
+                        self.server_checkboxes[alias].active = True
         else:
             self.toolbar.title = 'Νέο Πρόσταγμα'
             self.name_input.text = ''
             self.exec_input.text = ''
-            self.alias_btn.text = 'Primary'
+            # Επιλογή Primary by default
+            if 'Primary' in self.server_checkboxes:
+                self.server_checkboxes['Primary'].active = True
     
     def go_back(self):
         self.manager.current = 'commands_list'
@@ -903,15 +984,20 @@ class CommandEditScreen(Screen):
             self.error_lbl.text = 'Η εντολή είναι υποχρεωτική!'
             return
         
-        alias = self.alias_btn.text
+        # Συλλογή επιλεγμένων servers
+        selected_aliases = [alias for alias, checkbox in self.server_checkboxes.items() if checkbox.active]
+        
+        if not selected_aliases:
+            self.error_lbl.text = 'Πρέπει να επιλέξετε τουλάχιστον έναν server!'
+            return
         
         if self.mode == 'add':
-            result = database.add_command(name, executable, alias)
+            result = database.add_command(name, executable, selected_aliases)
             if result is None:
                 self.error_lbl.text = f'Το πρόσταγμα "{name}" υπάρχει ήδη!'
                 return
         else:
-            result = database.update_command(self.command_id, name, executable, alias)
+            result = database.update_command(self.command_id, name, executable, selected_aliases)
             if not result:
                 self.error_lbl.text = 'Αποτυχία ενημέρωσης (ίσως υπάρχει ήδη αυτό το όνομα)'
                 return
