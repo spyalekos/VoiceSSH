@@ -1033,6 +1033,68 @@ class VoiceSSHApp(MDApp):
         sm.add_widget(AboutScreen(name='about'))
         
         return sm
+    
+    def on_start(self):
+        """Καλείται όταν ξεκινά η εφαρμογή."""
+        # Δέσιμο του back button
+        Window.bind(on_keyboard=self.on_keyboard)
+        self.exit_dialog = None
+    
+    def on_keyboard(self, window, key, scancode, codepoint, modifier):
+        """
+        Χειρισμός του Android back button.
+        Returns True αν το event χειρίστηκε (αποτρέπει το default behavior).
+        """
+        # Back button = key 27 (Escape)
+        if key == 27:
+            current_screen = self.root.current
+            
+            # Αν είμαστε στην κεντρική οθόνη, ρωτάμε για έξοδο
+            if current_screen == 'main':
+                self.show_exit_confirmation()
+                return True  # Μην κάνεις το default (έξοδος)
+            
+            # Αν είμαστε σε άλλη οθόνη, πηγαίνουμε back
+            elif current_screen in ['commands_list', 'settings', 'about']:
+                self.root.current = 'main'
+                return True
+            
+            elif current_screen == 'command_edit':
+                self.root.current = 'commands_list'
+                return True
+            
+            elif current_screen == 'connection_edit':
+                self.root.current = 'settings'
+                return True
+        
+        # Για άλλα πλήκτρα, επιτρέπουμε το default behavior
+        return False
+    
+    def show_exit_confirmation(self):
+        """Εμφάνιση διαλόγου επιβεβαίωσης εξόδου."""
+        if not self.exit_dialog:
+            self.exit_dialog = MDDialog(
+                title="Έξοδος",
+                text="Θέλετε να εγκαταλείψετε την εφαρμογή;",
+                buttons=[
+                    MDRaisedButton(
+                        text="ΟΧΙ",
+                        on_release=lambda x: self.exit_dialog.dismiss()
+                    ),
+                    MDRaisedButton(
+                        text="ΝΑΙ",
+                        md_bg_color=(1, 0, 0, 1),
+                        on_release=lambda x: self.exit_app()
+                    ),
+                ],
+            )
+        self.exit_dialog.open()
+    
+    def exit_app(self):
+        """Έξοδος από την εφαρμογή."""
+        if self.exit_dialog:
+            self.exit_dialog.dismiss()
+        self.stop()
 
 
 # ---------- Run ----------

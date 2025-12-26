@@ -196,35 +196,111 @@ class SettingsScreen(Screen):
         # No need to dismiss here, select_path already calls exit_manager
         selected_file = selection[0]
         
+        # Δημιουργία custom layout με 2 γραμμές κουμπιών
+        buttons_layout = MDBoxLayout(
+            orientation='vertical',
+            adaptive_height=True,
+            spacing=dp(10),
+            padding=[dp(10), 0, dp(10), 0]
+        )
+        
+        # Πρώτη γραμμή: Συγχώνευση και Αντικατάσταση
+        first_row = MDBoxLayout(
+            orientation='horizontal',
+            adaptive_height=True,
+            spacing=dp(10)
+        )
+        
+        merge_btn = MDRaisedButton(
+            text="Συγχώνευση",
+            size_hint=(0.5, None),
+            on_release=lambda x: self.do_import(selected_file, 'merge')
+        )
+        
+        replace_btn = MDRaisedButton(
+            text="Αντικατάσταση",
+            size_hint=(0.5, None),
+            md_bg_color=(1, 0, 0, 1),
+            on_release=lambda x: self.do_import(selected_file, 'replace')
+        )
+        
+        first_row.add_widget(merge_btn)
+        first_row.add_widget(replace_btn)
+        
+        # Δεύτερη γραμμή: Ακύρωση (κεντραρισμένο)
+        second_row = MDBoxLayout(
+            orientation='horizontal',
+            adaptive_height=True,
+            padding=[dp(40), 0, dp(40), 0]
+        )
+        
+        cancel_btn = MDRaisedButton(
+            text="Ακύρωση",
+            size_hint=(1, None),
+            on_release=lambda x: self.import_mode_dialog.dismiss()
+        )
+        
+        second_row.add_widget(cancel_btn)
+        
+        buttons_layout.add_widget(first_row)
+        buttons_layout.add_widget(second_row)
+        
         self.import_mode_dialog = MDDialog(
             title="Τρόπος Εισαγωγής",
             text=f"Αρχείο: {os.path.basename(selected_file)}\n\nΠώς θέλετε να γίνει η εισαγωγή;",
-            buttons=[
-                MDRaisedButton(
-                    text="MERGE (Συνένωση)",
-                    on_release=lambda x: self.do_import(selected_file, 'merge')
-                ),
-                MDRaisedButton(
-                    text="REPLACE ALL",
-                    md_bg_color=(1, 0, 0, 1),
-                    on_release=lambda x: self.do_import(selected_file, 'replace')
-                ),
-                MDRaisedButton(
-                    text="ΑΚΥΡΩΣΗ",
-                    on_release=lambda x: self.import_mode_dialog.dismiss()
-                ),
-            ],
+            type="custom",
+            content_cls=buttons_layout,
         )
         self.import_mode_dialog.open()
 
+    def read_file_content(self, file_path):
+        """
+        Διαβάζει το περιεχόμενο ενός αρχείου, υποστηρίζοντας Android content:// URIs.
+        Returns: string with file content
+        """
+        if platform == 'android' and file_path.startswith('content://'):
+            # Χρήση ContentResolver για content:// URIs
+            try:
+                from jnius import autoclass
+                PythonActivity = autoclass('org.kivy.android.PythonActivity')
+                Uri = autoclass('android.net.Uri')
+                
+                uri = Uri.parse(file_path)
+                activity = PythonActivity.mActivity
+                content_resolver = activity.getContentResolver()
+                input_stream = content_resolver.openInputStream(uri)
+                
+                # Διάβασμα bytes από το InputStream
+                BufferedReader = autoclass('java.io.BufferedReader')
+                InputStreamReader = autoclass('java.io.InputStreamReader')
+                reader = BufferedReader(InputStreamReader(input_stream, 'UTF-8'))
+                
+                content_lines = []
+                line = reader.readLine()
+                while line is not None:
+                    content_lines.append(line)
+                    line = reader.readLine()
+                
+                reader.close()
+                input_stream.close()
+                
+                return '\n'.join(content_lines)
+            except Exception as e:
+                raise Exception(f"Σφάλμα ανάγνωσης content URI: {e}")
+        else:
+            # Κανονική ανάγνωση αρχείου
+            with open(file_path, 'r', encoding='utf-8') as f:
+                return f.read()
+    
     def do_import(self, file_path, mode):
         """Εκτέλεση της εισαγωγής από το επιλεγμένο αρχείο."""
         if hasattr(self, 'import_mode_dialog'):
             self.import_mode_dialog.dismiss()
         
         try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            # Χρήση του helper για να διαβάσουμε το αρχείο (υποστηρίζει content:// URIs)
+            content = self.read_file_content(file_path)
+            data = json.loads(content)
             
             success = database.import_db_data(data, mode)
             if success:
