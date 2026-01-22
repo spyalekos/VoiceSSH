@@ -196,7 +196,7 @@ class SettingsScreen(Screen):
         # No need to dismiss here, select_path already calls exit_manager
         selected_file = selection[0]
         
-        # Δημιουργία custom layout με 2 γραμμές κουμπιών
+        # Δημιουργία custom layout με 3 ξεχωριστές γραμμές κουμπιών
         buttons_layout = MDBoxLayout(
             orientation='vertical',
             adaptive_height=True,
@@ -204,46 +204,31 @@ class SettingsScreen(Screen):
             padding=[dp(10), 0, dp(10), 0]
         )
         
-        # Πρώτη γραμμή: Συγχώνευση και Αντικατάσταση
-        first_row = MDBoxLayout(
-            orientation='horizontal',
-            adaptive_height=True,
-            spacing=dp(10)
-        )
-        
+        # Πρώτη γραμμή: Συγχώνευση
         merge_btn = MDRaisedButton(
             text="Συγχώνευση",
-            size_hint=(0.5, None),
+            size_hint=(1, None),
             on_release=lambda x: self.do_import(selected_file, 'merge')
         )
         
+        # Δεύτερη γραμμή: Αντικατάσταση
         replace_btn = MDRaisedButton(
             text="Αντικατάσταση",
-            size_hint=(0.5, None),
+            size_hint=(1, None),
             md_bg_color=(1, 0, 0, 1),
             on_release=lambda x: self.do_import(selected_file, 'replace')
         )
         
-        first_row.add_widget(merge_btn)
-        first_row.add_widget(replace_btn)
-        
-        # Δεύτερη γραμμή: Ακύρωση (κεντραρισμένο)
-        second_row = MDBoxLayout(
-            orientation='horizontal',
-            adaptive_height=True,
-            padding=[dp(40), 0, dp(40), 0]
-        )
-        
+        # Τρίτη γραμμή: Ακύρωση
         cancel_btn = MDRaisedButton(
             text="Ακύρωση",
             size_hint=(1, None),
             on_release=lambda x: self.import_mode_dialog.dismiss()
         )
         
-        second_row.add_widget(cancel_btn)
-        
-        buttons_layout.add_widget(first_row)
-        buttons_layout.add_widget(second_row)
+        buttons_layout.add_widget(merge_btn)
+        buttons_layout.add_widget(replace_btn)
+        buttons_layout.add_widget(cancel_btn)
         
         self.import_mode_dialog = MDDialog(
             title="Τρόπος Εισαγωγής",

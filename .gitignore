@@ -1,0 +1,52 @@
+# Build directories
+.buildozer/
+bin/
+build/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+build.log
+last_build.log
+
+# Database files (local)
+*.db
+*.db.backup.json
+commands_backup.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test files
+test_*.py
+verify_*.py
+
+# Temporary files
+*.bak
+*.tmp
+
+# Gemini
+.gemini/
+
+# Windows scripts (not needed for Android)
+*.bat
+*.ps1
